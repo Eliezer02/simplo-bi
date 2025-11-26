@@ -19,6 +19,7 @@
     "dotenv": "^17.2.3",
     "express": "^5.1.0",
     "multer": "^2.0.2",
+    "openai": "^4.28.0",
     "papaparse": "^5.5.3"
   },
   "devDependencies": {
