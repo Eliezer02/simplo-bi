@@ -106,63 +106,71 @@ const normalizeRow = (row: any, mapping: typeof DEFAULT_MAPPING) => {
     };
 };
 
-// --- 1. ROTA DE UPLOAD 
+// --- 1. ROTA DE UPLOAD (com deduplicação e hash por linha) ---
 app.post('/api/upload', upload.single('file'), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'Arquivo não enviado.' });
 
   try {
-    const user = await getUser(req); 
+    const user = await getUser(req);
     const userId = user.id;
 
-    // Futuramente, activeMapping virá do req.body
-    const activeMapping = DEFAULT_MAPPING; 
+    const activeMapping = DEFAULT_MAPPING;
 
     const csvFileContent = req.file.buffer.toString('utf-8');
     const parsedData = Papa.parse(csvFileContent, { header: true, skipEmptyLines: true }).data;
 
-    const rowsToUpsert = parsedData.map((rawRow: any) => {
-       
-        const cleanRow = normalizeRow(rawRow, activeMapping);
+    // Passo 1: Normalizar e Gerar Hash
+    const rawRows = parsedData.map((rawRow: any) => {
+      const cleanRow = normalizeRow(rawRow, activeMapping);
 
+      const signature = `${userId}-${cleanRow.data_criacao}-${cleanRow.nome_cliente}-${cleanRow.valor}-${cleanRow.produto}`;
+      const uniqueHash = crypto.createHash('md5').update(signature).digest('hex');
 
-        const signature = `${userId}-${cleanRow.data_criacao}-${cleanRow.nome_cliente}-${cleanRow.valor}-${cleanRow.produto}`;
-        const uniqueHash = crypto.createHash('md5').update(signature).digest('hex');
-
-        return {
-            user_id: userId,
-            unique_hash: uniqueHash,
-            ...cleanRow
-        };
+      return {
+        user_id: userId,
+        unique_hash: uniqueHash,
+        ...cleanRow,
+      };
     });
 
+    // Passo 2: Deduplicação em memória (dentro do próprio CSV)
+    const uniqueRowsMap = new Map<string, any>();
+    rawRows.forEach((row: any) => {
+      uniqueRowsMap.set(row.unique_hash, row);
+    });
+    const rowsToUpsert = Array.from(uniqueRowsMap.values());
 
+    // Passo 3: Upsert em lotes
     const batchSize = 1000;
-    
-    for (let i = 0; i < rowsToUpsert.length; i += batchSize) {
-        const batch = rowsToUpsert.slice(i, i + batchSize);
-        
+    let totalImported = 0;
 
-        const { error } = await supabase
-            .from('oportunidades')
-            .upsert(batch, { 
-                onConflict: 'user_id, unique_hash', 
-                ignoreDuplicates: false 
-            });
-            
-        if (error) throw error;
+    for (let i = 0; i < rowsToUpsert.length; i += batchSize) {
+      const batch = rowsToUpsert.slice(i, i + batchSize);
+
+      const { error } = await supabase
+        .from('oportunidades')
+        .upsert(batch, {
+          onConflict: 'user_id, unique_hash',
+          ignoreDuplicates: false,
+        });
+
+      if (error) {
+        console.error('Erro no batch:', error);
+        throw error;
+      }
+
+      totalImported += batch.length;
     }
 
-
     const { data: finalData } = await supabase
-        .from('oportunidades')
-        .select('*')
-        .eq('user_id', userId);
+      .from('oportunidades')
+      .select('*')
+      .eq('user_id', userId);
 
-    res.json({ message: 'Processamento concluído', importedData: finalData });
-
+    res.json({ message: 'Processamento concluído', importedData: finalData, total: totalImported });
   } catch (error: any) {
-    console.error("Erro upload:", error.message);
-    res.status(401).json({ error: error.message || 'Erro ao processar arquivo' });
+    console.error('Erro crítico upload:', error);
+    res.status(500).json({ error: error.message || 'Erro interno no servidor' });
   }
 });
 
