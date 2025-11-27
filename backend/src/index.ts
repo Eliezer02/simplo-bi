@@ -52,7 +52,8 @@ const DEFAULT_MAPPING = {
     cliente: ['Cliente', 'Nome', 'Empresa', 'Lead', 'Nome do Cliente'],
     estado: ['Estado', 'UF', 'U.F.', 'State', 'Região'],
     cidade: ['Cidade', 'City', 'Municipio', 'Local'],
-    produto: ['Produto', 'Produtos', 'Serviço', 'Item', 'Mercadoria', 'Product'] // Plural adicionado aqui
+    produto: ['Produto', 'Produtos', 'Serviço', 'Item', 'Mercadoria', 'Product'],
+    motivo: ['Motivo', 'Motivo da Perda', 'Reason', 'Observação', 'Obs', 'Detalhe Perda']
 };
 
 // Normaliza uma linha de CSV "suja" para o padrão do nosso banco
@@ -102,8 +103,36 @@ const normalizeRow = (row: any, mapping: typeof DEFAULT_MAPPING) => {
         nome_cliente: find(mapping.cliente) || 'Anônimo',
         estado: find(mapping.estado)?.substring(0, 2).toUpperCase() || 'NA',
         cidade: find(mapping.cidade) || 'N/A',
-        produto: find(mapping.produto) || 'Geral'
+        produto: find(mapping.produto) || 'Geral',
+        motivo_perda: find(mapping.motivo) || 'Não informado'
     };
+};
+
+const fetchAllUserOpportunities = async (userId: string) => {
+  let allRows: any[] = [];
+  let from = 0;
+  const step = 1000;
+  let more = true;
+
+  while (more) {
+    const { data, error } = await supabase
+      .from('oportunidades')
+      .select('*')
+      .eq('user_id', userId)
+      .range(from, from + step - 1);
+
+    if (error) throw error;
+
+    if (data && data.length > 0) {
+      allRows = [...allRows, ...data];
+      from += step;
+      if (data.length < step) more = false;
+    } else {
+      more = false;
+    }
+  }
+
+  return allRows;
 };
 
 // --- 1. ROTA DE UPLOAD (com deduplicação e hash por linha) ---
@@ -114,16 +143,19 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
     const user = await getUser(req);
     const userId = user.id;
 
-    const activeMapping = DEFAULT_MAPPING;
+    const activeMapping = {
+      ...DEFAULT_MAPPING,
+      motivo: ['Motivo', 'Motivo da Perda', 'Reason', 'Observação', 'Obs', 'Detalhe Perda'],
+    };
 
     const csvFileContent = req.file.buffer.toString('utf-8');
     const parsedData = Papa.parse(csvFileContent, { header: true, skipEmptyLines: true }).data;
 
-    // Passo 1: Normalizar e Gerar Hash
     const rawRows = parsedData.map((rawRow: any) => {
       const cleanRow = normalizeRow(rawRow, activeMapping);
 
-      const signature = `${userId}-${cleanRow.data_criacao}-${cleanRow.nome_cliente}-${cleanRow.valor}-${cleanRow.produto}`;
+      const motivo = cleanRow.motivo_perda || '';
+      const signature = `${userId}-${cleanRow.data_criacao}-${cleanRow.nome_cliente}-${cleanRow.valor}-${cleanRow.produto}-${motivo}`;
       const uniqueHash = crypto.createHash('md5').update(signature).digest('hex');
 
       return {
@@ -133,16 +165,13 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
       };
     });
 
-    // Passo 2: Deduplicação em memória (dentro do próprio CSV)
     const uniqueRowsMap = new Map<string, any>();
     rawRows.forEach((row: any) => {
       uniqueRowsMap.set(row.unique_hash, row);
     });
     const rowsToUpsert = Array.from(uniqueRowsMap.values());
 
-    // Passo 3: Upsert em lotes
     const batchSize = 1000;
-    let totalImported = 0;
 
     for (let i = 0; i < rowsToUpsert.length; i += batchSize) {
       const batch = rowsToUpsert.slice(i, i + batchSize);
@@ -158,16 +187,15 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
         console.error('Erro no batch:', error);
         throw error;
       }
-
-      totalImported += batch.length;
     }
 
-    const { data: finalData } = await supabase
-      .from('oportunidades')
-      .select('*')
-      .eq('user_id', userId);
+    const finalData = await fetchAllUserOpportunities(userId);
 
-    res.json({ message: 'Processamento concluído', importedData: finalData, total: totalImported });
+    res.json({
+      message: 'Processamento concluído',
+      importedData: finalData,
+      total: finalData.length,
+    });
   } catch (error: any) {
     console.error('Erro crítico upload:', error);
     res.status(500).json({ error: error.message || 'Erro interno no servidor' });
@@ -187,6 +215,26 @@ app.post('/api/analyze', async (req, res) => {
     const profile = await generateAnalyticalProfile(userId);
     
     if (!profile) return res.status(400).json({ error: 'Sem dados para analisar.' });
+
+    // NOVO: Agrupamento de Motivos de Perda
+    const { data: rowsPerdidas } = await supabase
+      .from('oportunidades')
+      .select('motivo_perda')
+      .eq('user_id', userId)
+      .eq('status', 'Perdida');
+
+    const motivosPerda: Record<string, number> = {};
+    if (rowsPerdidas) {
+      rowsPerdidas.forEach((row: any) => {
+        const motivo = row.motivo_perda || 'Não informado';
+        motivosPerda[motivo] = (motivosPerda[motivo] || 0) + 1;
+      });
+    }
+
+    const topMotivos = Object.entries(motivosPerda)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 5) // Top 5 motivos
+      .map(([m, qtd]) => `- ${m}: ${qtd} perdas`);
 
     // 3. Prompt Especialista de BI
     const prompt = `
@@ -218,6 +266,9 @@ app.post('/api/analyze', async (req, res) => {
       - Estados Top: ${JSON.stringify(profile.geografia?.estados?.slice(0, 5) || [], null, 2)}
       - Cidades Top: ${JSON.stringify(profile.geografia?.cidades?.slice(0, 5) || [], null, 2)}
       - Produtos Top: ${JSON.stringify(profile.produtos?.slice(0, 5) || [], null, 2)}
+
+      7. PRINCIPAIS MOTIVOS DE PERDA (Diagnóstico de Falhas):
+      ${topMotivos.length > 0 ? topMotivos.join('\n') : '- Nenhuma perda registrada com motivo informado'}
 
       --- ESTRUTURA DO RELATÓRIO EXECUTIVO (MARKDOWN) ---
 
