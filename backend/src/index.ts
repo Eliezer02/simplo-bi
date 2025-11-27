@@ -390,3 +390,7 @@ app.post('/api/chat', async (req, res) => {
     res.status(500).json({ error: error.message });
   }
 });
+
+app.listen(PORT, () => { 
+  console.log(`🚀 Servidor rodando na porta ${PORT}`); 
+});
