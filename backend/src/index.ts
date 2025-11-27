@@ -295,22 +295,21 @@ app.post('/api/chat', async (req, res) => {
     if (responseMessage.tool_calls) {
       messages.push(responseMessage);
 
-      for (const toolCall of responseMessage.tool_calls) {
+      for (const toolCallItem of responseMessage.tool_calls) {
+        const toolCall = toolCallItem as any; // <--- CORREÇÃO DO ERRO
+
         if (toolCall.function.name === "analisar_dados_complexos") {
           const args = JSON.parse(toolCall.function.arguments);
           const { filtros = {}, agrupar_por = [] } = args;
 
-          // 1. Busca TUDO do usuário (pois precisamos processar no código)
-          // Isso é seguro porque o user_id filtra no banco
+          // 1. Busca TUDO do usuário
           let query = supabase.from('oportunidades').select('*').eq('user_id', userId);
           
-          // Aplica filtros básicos no banco para otimizar
           if (filtros.responsavel) query = query.ilike('responsavel', `%${filtros.responsavel}%`);
           if (filtros.produto) query = query.ilike('produto', `%${filtros.produto}%`);
           if (filtros.origem) query = query.ilike('origem_lead', `%${filtros.origem}%`);
           if (filtros.status) query = query.eq('status', filtros.status);
           
-          // Filtro de Data
           if (filtros.ano) {
              query = query.gte('data_criacao', `${filtros.ano}-01-01`).lte('data_criacao', `${filtros.ano}-12-31`);
           }
@@ -318,17 +317,15 @@ app.post('/api/chat', async (req, res) => {
           const { data: rows } = await query;
           if (!rows) throw new Error("Erro ao buscar dados.");
 
-          // 2. Processamento em Memória (O Cérebro da Operação)
+          // 2. Processamento em Memória
           const agrupados: Record<string, { qtd: number, valor: number, detalhes: any }> = {};
 
           rows.forEach((row: any) => {
-             // Filtro manual de Mês (se o banco não filtrou)
              if (filtros.mes) {
                  const d = new Date(row.data_criacao);
                  if (d.getMonth() + 1 !== filtros.mes) return;
              }
 
-             // Cria a chave de agrupamento (Ex: "01/2025 - Preço Alto")
              const chave = agrupar_por.map((campo: string) => {
                  if (campo === 'mes') {
                      const d = new Date(row.data_criacao);
@@ -345,15 +342,15 @@ app.post('/api/chat', async (req, res) => {
              agrupados[chave].valor += Number(row.valor) || 0;
           });
 
-          // 3. Formata para a IA (Top 30 para não estourar tokens)
+          // 3. Formata para a IA
           const relatorio = Object.entries(agrupados)
              .map(([grupo, dados]) => ({
                  grupo,
                  volume: dados.qtd,
                  receita: dados.valor.toFixed(2)
              }))
-             .sort((a, b) => b.volume - a.volume) // Ordena por volume
-             .slice(0, 40); // Limite de segurança
+             .sort((a, b) => b.volume - a.volume)
+             .slice(0, 40);
 
           messages.push({
             role: "tool",
@@ -383,5 +380,3 @@ app.post('/api/chat', async (req, res) => {
     res.status(500).json({ error: error.message });
   }
 });
-
-app.listen(PORT, () => { console.log(`🚀 Servidor na porta ${PORT}`); });
