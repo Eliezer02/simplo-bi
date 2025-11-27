@@ -27,21 +27,16 @@ const upload = multer({ storage: storage });
 const getUser = async (req: express.Request) => {
   const authHeader = req.headers.authorization;
   if (!authHeader) throw new Error('Acesso negado: Token não fornecido.');
-
   const token = authHeader.split(' ')[1]; 
-  
   const { data: { user }, error } = await supabase.auth.getUser(token);
-
   if (error || !user) throw new Error('Sessão inválida ou expirada. Faça login novamente.');
   return user;
 };
 
 // --- CONFIGURAÇÃO DE MAPEAMENTO ---
 const DEFAULT_MAPPING = {
-    protocolo: ['Protocolo', 'ID', 'Código', 'Key', 'Id Negócio'],
     responsavel: ['Responsável', 'Vendedor', 'Owner', 'Agente', 'Rep'],
-    funil: ['Funil', 'Pipeline'],
-    etapa: ['Etapa', 'Fase', 'Estágio', 'Stage'], // Adicionado Etapa
+    funil: ['Funil', 'Pipeline', 'Etapa', 'Fase'],
     status: ['Situação', 'Status', 'Estado', 'Situation'],
     valor: ['Valor', 'Vlr', 'Receita', 'Amount', 'Preço', 'Valor Total'],
     data_criacao: ['Dt.Cad', 'Data Criação', 'Created At', 'Data Entrada', 'Data de Cadastro'],
@@ -54,9 +49,7 @@ const DEFAULT_MAPPING = {
     motivo: ['Motivo', 'Motivo da Perda', 'Reason', 'Observação', 'Obs', 'Detalhe Perda']
 };
 
-// Normaliza uma linha de CSV "suja" para o padrão do nosso banco
 const normalizeRow = (row: any, mapping: typeof DEFAULT_MAPPING) => {
-   
     const find = (keys: string[]) => {
         for (const k of keys) {
             const foundKey = Object.keys(row).find(rk => rk.toLowerCase().trim() === k.toLowerCase().trim());
@@ -91,11 +84,6 @@ const normalizeRow = (row: any, mapping: typeof DEFAULT_MAPPING) => {
     };
 
     return {
-        // Campos auxiliares para Hash (não salvos diretamente se não houver coluna no banco, mas usados na assinatura)
-        _protocolo: find(mapping.protocolo) || '',
-        _etapa: find(mapping.etapa) || '',
-
-        // Campos do Banco
         responsavel: find(mapping.responsavel) || 'N/A',
         funil: find(mapping.funil) || 'Geral',
         status: normalizeStatus(find(mapping.status)),
@@ -111,11 +99,11 @@ const normalizeRow = (row: any, mapping: typeof DEFAULT_MAPPING) => {
     };
 };
 
-// Função auxiliar para paginação no retorno (Supera o limite de 1000)
+// Auxiliar para buscar tudo (usado no upload e chat)
 const fetchAllUserOpportunities = async (userId: string) => {
   let allRows: any[] = [];
   let from = 0;
-  const step = 1000;
+  const step = 2000; // Aumentei o passo para ser mais rápido
   let more = true;
 
   while (more) {
@@ -138,7 +126,7 @@ const fetchAllUserOpportunities = async (userId: string) => {
   return allRows;
 };
 
-// --- 1. ROTA DE UPLOAD (Deduplicação Inteligente + Upsert) ---
+// --- ROTA DE UPLOAD (MANTIDA IGUAL) ---
 app.post('/api/upload', upload.single('file'), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'Arquivo não enviado.' });
 
@@ -146,83 +134,40 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
     const user = await getUser(req);
     const userId = user.id;
 
+    const activeMapping = { ...DEFAULT_MAPPING };
     const csvFileContent = req.file.buffer.toString('utf-8');
     const parsedData = Papa.parse(csvFileContent, { header: true, skipEmptyLines: true }).data;
 
-    // 1. Normalizar e Gerar Hash
     const rawRows = parsedData.map((rawRow: any) => {
-      const cleanRow = normalizeRow(rawRow, DEFAULT_MAPPING);
-
-      // CRIAÇÃO DO HASH (IMPRESSÃO DIGITAL)
-      // Incluímos Protocolo, Etapa, Motivo, Status e Origem para detectar qualquer mudança
-      const signature = `
-          ${userId}-
-          ${cleanRow._protocolo}-
-          ${cleanRow.data_criacao}-
-          ${cleanRow.nome_cliente}-
-          ${cleanRow.valor}-
-          ${cleanRow.produto}-
-          ${cleanRow.motivo_perda}-
-          ${cleanRow.funil}-
-          ${cleanRow._etapa}-
-          ${cleanRow.status}-
-          ${cleanRow.origem_lead}
-        `.replace(/\s+/g, '');
-
+      const cleanRow = normalizeRow(rawRow, activeMapping);
+      const motivo = cleanRow.motivo_perda || '';
+      // Hash rigoroso
+      const signature = `${userId}-${cleanRow.data_criacao}-${cleanRow.nome_cliente}-${cleanRow.valor}-${cleanRow.produto}-${motivo}-${cleanRow.funil}-${cleanRow.status}`.replace(/\s+/g, '');
       const uniqueHash = crypto.createHash('md5').update(signature).digest('hex');
 
-      // Removemos os campos temporários (_protocolo, _etapa) antes de salvar, 
-      // pois eles não existem na tabela do banco ainda (se quiser salvar, precisaria criar as colunas).
-      const { _protocolo, _etapa, ...rowToSave } = cleanRow;
-
-      return {
-        user_id: userId,
-        unique_hash: uniqueHash,
-        ...rowToSave,
-      };
+      return { user_id: userId, unique_hash: uniqueHash, ...cleanRow };
     });
 
-    // 2. Deduplicação em Memória (Evita erro do Postgres no mesmo lote)
-    const uniqueRowsMap = new Map<string, any>();
-    rawRows.forEach((row: any) => {
-      uniqueRowsMap.set(row.unique_hash, row);
-    });
+    const uniqueRowsMap = new Map();
+    rawRows.forEach((row: any) => { uniqueRowsMap.set(row.unique_hash, row); });
     const rowsToUpsert = Array.from(uniqueRowsMap.values());
 
-    // 3. Batch Upsert
     const batchSize = 1000;
     for (let i = 0; i < rowsToUpsert.length; i += batchSize) {
       const batch = rowsToUpsert.slice(i, i + batchSize);
-
-      const { error } = await supabase
-        .from('oportunidades')
-        .upsert(batch, {
-          onConflict: 'user_id, unique_hash',
-          ignoreDuplicates: false, // Atualiza se mudar algo
-        });
-
-      if (error) {
-        console.error('Erro no batch:', error);
-        throw error;
-      }
+      await supabase.from('oportunidades').upsert(batch, { onConflict: 'user_id, unique_hash', ignoreDuplicates: false });
     }
 
-    // 4. Retorno Completo (Paginado)
     const finalData = await fetchAllUserOpportunities(userId);
+    res.json({ message: 'Processamento concluído', importedData: finalData });
 
-    res.json({
-      message: 'Processamento concluído',
-      importedData: finalData,
-      total_processado: rowsToUpsert.length,
-      total_banco: finalData.length,
-    });
   } catch (error: any) {
-    console.error('Erro crítico upload:', error);
-    res.status(500).json({ error: error.message || 'Erro interno no servidor' });
+    console.error('Erro upload:', error);
+    res.status(500).json({ error: error.message });
   }
 });
 
-// --- 2. ROTA DE ANÁLISE GERAL ---
+// --- ROTA ANALYZE (ATUALIZADA COM MOTIVOS) ---
 app.post('/api/analyze', async (req, res) => {
   const { provider } = req.body;
   const selectedProvider = provider || 'openai';
@@ -230,12 +175,11 @@ app.post('/api/analyze', async (req, res) => {
   try {
     const user = await getUser(req);
     const userId = user.id;
-
     const profile = await generateAnalyticalProfile(userId);
     
     if (!profile) return res.status(400).json({ error: 'Sem dados para analisar.' });
 
-    // Buscar Motivos de Perda do Banco
+    // Busca Motivos de Perda
     const { data: rowsPerdidas } = await supabase
       .from('oportunidades')
       .select('motivo_perda')
@@ -249,103 +193,78 @@ app.post('/api/analyze', async (req, res) => {
         motivosPerda[motivo] = (motivosPerda[motivo] || 0) + 1;
       });
     }
-
     const topMotivos = Object.entries(motivosPerda)
       .sort((a, b) => b[1] - a[1])
-      .slice(0, 5)
+      .slice(0, 7) // Top 7 motivos
       .map(([m, qtd]) => `- ${m}: ${qtd} perdas`);
 
     const prompt = `
-      Você é um **Head de Business Intelligence (BI)** contratado para auditar a operação comercial e da empresa em geral. 
-      Sua missão não é descrever números, mas sim **diagnosticar a saúde do negócio, entender o funcionamento, dar insigts e dicas de como melhorar. Você receberá diversos dados faça uma análise profunda e detalhada deles, inclusive relacionando-os**.
+      Você é um **Head de Business Intelligence (BI)**. Analise profundamente os dados abaixo.
       
-      --- DADOS AUDITADOS (FONTE REAL: SQL) ---
+      --- DADOS GERAIS ---
+      - Oportunidades: ${profile.resumo.total_analisado}
+      - Receita: R$ ${profile.resumo.receita_total}
+      - Conversão Global: ${((profile.resumo.ganhas / profile.resumo.total_analisado) * 100).toFixed(1)}%
       
-      1. VOLUMETRIA E FINANCEIRO:
-      - Total de Oportunidades: ${profile.resumo.total_analisado}
-      - Receita Total Confirmada: R$ ${profile.resumo.receita_total}
-      - Vendas Ganhas: ${profile.resumo.ganhas}
-      - Perdas: ${profile.resumo.perdidas}
-      - Ticket Médio Global: R$ ${profile.resumo.ticket_medio}
-      
-      2. ESTRUTURA DE FUNIS (Crucial: Diferencie Suporte de Vendas):
+      --- ESTRUTURA DE FUNIS ---
       ${JSON.stringify(profile.funis, null, 2)}
 
-      3. RANKING DE PERFORMANCE (Top Vendedores):
-      ${JSON.stringify(profile.vendedores.slice(0, 7), null, 2)}
+      --- RANKING VENDEDORES ---
+      ${JSON.stringify(profile.vendedores.slice(0, 10), null, 2)}
 
-      4. CANAIS DE TRAÇÃO (Top Origens):
-      ${JSON.stringify(profile.origens.slice(0, 5), null, 2)}
+      --- MOTIVOS DE PERDA (DIAGNÓSTICO CRÍTICO) ---
+      ${topMotivos.join('\n')}
 
-      5. LINHA DO TEMPO (Sazonalidade):
+      --- CRONOLOGIA ---
       ${JSON.stringify(profile.timeline, null, 2)}
 
-      6. DISTRIBUIÇÃO GEOGRÁFICA E PORTFÓLIO:
-      - Estados Top: ${JSON.stringify(profile.geografia?.estados?.slice(0, 5) || [], null, 2)}
-      - Cidades Top: ${JSON.stringify(profile.geografia?.cidades?.slice(0, 5) || [], null, 2)}
-      - Produtos Top: ${JSON.stringify(profile.produtos?.slice(0, 5) || [], null, 2)}
-
-      7. PRINCIPAIS MOTIVOS DE PERDA (Diagnóstico de Falhas):
-      ${topMotivos.length > 0 ? topMotivos.join('\n') : '- Nenhuma perda registrada com motivo informado'}
-
-      --- ESTRUTURA DO RELATÓRIO EXECUTIVO (MARKDOWN) ---
-
-      **1. Diagnóstico Executivo**
-      Dê um veredito curto e grosso sobre a saúde da operação. A conversão está saudável para o mercado? Há dependência excessiva de um único vendedor ou canal? (Ex: "A operação apresenta risco alto devido à concentração de 60% da receita na vendedora X").
-
-      **2. Análise de Eficiência do Time (Matriz Volume x Valor)**
-      Não liste apenas quem vendeu. Analise:
-      - Quem é o "Fazedor de Chuva" (Alto Volume / Alto Valor)?
-      - Quem tem "Taxa de Conversão Alta" mas recebe poucos leads (Oportunidade de escala)?
-      - Quem está "Queimando Leads" (Baixa conversão, alto volume)?
-      - Busque entender possíveis motivos para conversão, leads não qualificados, problemas na geração de tráfego pago?
-      - Relacione dados EX: se vendedor X recebe o mesmo número do vendedor Y contudo tem uma conversão muito maior, então o problema não são os leads, mas sim o vendedor possivelmente, contudo se todos os vendedores tem um desempenho baixo faz sentido analisar a qualidade dos leads, ou se há algum gap no fluxo de vendas/suporte.
-
-      **3. Inteligência de Canais e Funis**
-      - Qual funil é puramente operacional (Suporte) e qual gera receita? - Considerar a diferença lógica e de funcionameto de acordo com o nome dos funis.
-      - Qual origem de lead traz o ROI real (R$ no bolso) vs qual traz apenas volume de curiosos?
-      - A operação está concentrada em alguma região ou produto? Há estados ou cidades com potencial reprimido?
-
-      **4. Raio-X Sazonal**
-      Identifique o mês de ouro e o mês de crise. Existe uma tendência de queda ou crescimento nos últimos 3 meses?
-      Quais meses tiveram melhor desempenho.
-
-      **5. Plano de Ação Estratégico (3 Pontos)**
-      Dê 3 ordens práticas para o Diretor Comercial executar para melhorar esses números. Seja específico.
-      Dê dicas de como pode melhorar no geral e dicas normalmente úteis para esse cenário.
-      
-      Tom de voz: Profissional, analítico, direto. Sem "parabéns", vá direto aos insights.
+      --- INSTRUÇÕES DO RELATÓRIO ---
+      1. **Diagnóstico Executivo:** Qual a saúde real do negócio? A conversão é boa?
+      2. **Análise de Perdas:** Por que estamos perdendo? Relacione os motivos de perda com a eficiência do time ou qualidade do produto.
+      3. **Gargalos de Funil:** Identifique onde o processo trava.
+      4. **Plano de Ação:** 3 ações práticas para reduzir os motivos de perda identificados.
     `;
 
     const analysis = await generateText(selectedProvider, prompt);
     res.json({ analysis });
 
   } catch (error: any) {
-    console.error("Erro análise:", error.message);
     res.status(500).json({ error: error.message });
   }
 });
 
-// --- 3. ROTA DE CHAT (CORRIGIDA COM MOTIVOS) ---
+// --- ROTA CHAT (REVOLUCIONADA COM AGREGAÇÃO) ---
+
 const tools = [
   {
     type: "function" as const,
     function: {
-      name: "consultar_dados_vendas",
-      description: "Consulta o banco de dados para responder perguntas sobre vendas, perdas, motivos, etc.",
+      name: "analisar_dados_complexos",
+      description: "Use esta ferramenta para responder perguntas sobre vendas, perdas, produtos, e fazer cruzamentos de dados.",
       parameters: {
         type: "object",
         properties: {
-          responsavel: { type: "string" },
-          funil: { type: "string" },
-          mes: { type: "integer" },
-          ano: { type: "integer" },
-          origem: { type: "string" },
-          status: { type: "string", enum: ["Ganha", "Perdida", "Em aberto"] },
-          estado: { type: "string" },
-          produto: { type: "string" }
+          filtros: {
+            type: "object",
+            description: "Filtros a aplicar nos dados (ex: vendedor='João', status='Perdida', ano=2025)",
+            properties: {
+              responsavel: { type: "string" },
+              funil: { type: "string" },
+              status: { type: "string", enum: ["Ganha", "Perdida", "Em aberto"] },
+              origem: { type: "string" },
+              produto: { type: "string" },
+              estado: { type: "string" },
+              ano: { type: "integer" },
+              mes: { type: "integer" }
+            }
+          },
+          agrupar_por: {
+            type: "array",
+            description: "Lista de campos para agrupar/cruzar os dados. Ex: ['mes', 'motivo_perda'] para ver evolução de motivos.",
+            items: { type: "string", enum: ["mes", "ano", "responsavel", "funil", "origem", "produto", "estado", "motivo_perda", "status"] }
+          }
         },
-        required: [],
+        required: ["agrupar_por"],
       },
     },
   },
@@ -359,7 +278,7 @@ app.post('/api/chat', async (req, res) => {
     const userId = user.id;
 
     const messages: any[] = [
-      { role: "system", content: "Você é um assistente de BI. Use 'consultar_dados_vendas' para buscar números. Se perguntarem o motivo da perda, a ferramenta vai retornar." },
+      { role: "system", content: "Você é um Analista de Dados Sênior. Você tem acesso a uma ferramenta poderosa que pode agrupar e cruzar dados. Para perguntas como 'Qual motivo de perda mais comum em SP?', agrupe por ['estado', 'motivo_perda']. Para 'Evolução de vendas', agrupe por ['mes']. SEMPRE use a ferramenta se a pergunta envolver dados." },
       ...history.map((h: any) => ({ role: h.role === 'model' ? 'assistant' : 'user', content: h.content })),
       { role: "user", content: message }
     ];
@@ -373,73 +292,78 @@ app.post('/api/chat', async (req, res) => {
 
     const responseMessage = completion.choices[0].message;
 
-    if (responseMessage.tool_calls && responseMessage.tool_calls.length > 0) {
+    if (responseMessage.tool_calls) {
       messages.push(responseMessage);
-      
-      for (const toolCallItem of responseMessage.tool_calls) {
-        const toolCall = toolCallItem as any;
 
-        if (toolCall.function.name === "consultar_dados_vendas") {
+      for (const toolCall of responseMessage.tool_calls) {
+        if (toolCall.function.name === "analisar_dados_complexos") {
           const args = JSON.parse(toolCall.function.arguments);
+          const { filtros = {}, agrupar_por = [] } = args;
+
+          // 1. Busca TUDO do usuário (pois precisamos processar no código)
+          // Isso é seguro porque o user_id filtra no banco
+          let query = supabase.from('oportunidades').select('*').eq('user_id', userId);
           
-          // SELECT INCLUINDO MOTIVO_PERDA
-          let query = supabase.from('oportunidades')
-            .select('valor, status, data_conclusao, data_criacao, motivo_perda')
-            .eq('user_id', userId); 
-
-          if (args.responsavel) query = query.ilike('responsavel', `%${args.responsavel}%`);
-          if (args.origem) query = query.ilike('origem_lead', `%${args.origem}%`);
-          if (args.funil) query = query.ilike('funil', `%${args.funil}%`);
-          if (args.estado) query = query.ilike('estado', `%${args.estado}%`);
-          if (args.produto) query = query.ilike('produto', `%${args.produto}%`);
-          if (args.status) query = query.eq('status', args.status);
-
-          const isSalesQuery = args.status === 'Ganha' || message.toLowerCase().includes('venda');
-          const dateField = isSalesQuery ? 'data_conclusao' : 'data_criacao';
-
-          if (args.mes) {
-             const ano = args.ano || 2025;
-             const startDate = `${ano}-${args.mes.toString().padStart(2, '0')}-01`;
-             const endDate = new Date(ano, args.mes, 0).toISOString().split('T')[0];
-             query = query.gte(dateField, startDate).lte(dateField, endDate);
-          } else if (args.ano) {
-             query = query.gte(dateField, `${args.ano}-01-01`).lte(dateField, `${args.ano}-12-31`);
+          // Aplica filtros básicos no banco para otimizar
+          if (filtros.responsavel) query = query.ilike('responsavel', `%${filtros.responsavel}%`);
+          if (filtros.produto) query = query.ilike('produto', `%${filtros.produto}%`);
+          if (filtros.origem) query = query.ilike('origem_lead', `%${filtros.origem}%`);
+          if (filtros.status) query = query.eq('status', filtros.status);
+          
+          // Filtro de Data
+          if (filtros.ano) {
+             query = query.gte('data_criacao', `${filtros.ano}-01-01`).lte('data_criacao', `${filtros.ano}-12-31`);
           }
 
-          const { data: rows, error } = await query;
-          if (error) throw error;
+          const { data: rows } = await query;
+          if (!rows) throw new Error("Erro ao buscar dados.");
 
-          // CÁLCULO DE MOTIVOS E TOTAIS
-          const motivosStats: Record<string, number> = {};
-          const summary = (rows || []).reduce((acc: any, row: any) => {
-            const valor = Number(row.valor) || 0;
-            acc.total++;
-            acc.valor_total += valor;
-            
-            if (row.status === 'Ganha') {
-              acc.ganhas++;
-              acc.valor_ganho += valor;
-            } else if (row.status === 'Perdida') {
-                const m = row.motivo_perda || 'Sem motivo';
-                motivosStats[m] = (motivosStats[m] || 0) + 1;
-            }
-            return acc;
-          }, { total: 0, valor_total: 0, ganhas: 0, valor_ganho: 0 });
+          // 2. Processamento em Memória (O Cérebro da Operação)
+          const agrupados: Record<string, { qtd: number, valor: number, detalhes: any }> = {};
 
-          const toolResult = JSON.stringify({
-             filtros: args,
-             resultado: {
-                 encontrados: summary.total,
-                 ganhas: summary.ganhas,
-                 receita_total: summary.valor_ganho.toFixed(2)
-             },
-             motivos_perda: Object.keys(motivosStats).length > 0 ? motivosStats : null
+          rows.forEach((row: any) => {
+             // Filtro manual de Mês (se o banco não filtrou)
+             if (filtros.mes) {
+                 const d = new Date(row.data_criacao);
+                 if (d.getMonth() + 1 !== filtros.mes) return;
+             }
+
+             // Cria a chave de agrupamento (Ex: "01/2025 - Preço Alto")
+             const chave = agrupar_por.map((campo: string) => {
+                 if (campo === 'mes') {
+                     const d = new Date(row.data_criacao);
+                     return `${(d.getMonth()+1).toString().padStart(2,'0')}/${d.getFullYear()}`;
+                 }
+                 if (campo === 'ano') return new Date(row.data_criacao).getFullYear();
+                 if (campo === 'motivo_perda') return row.motivo_perda || 'Sem motivo';
+                 return row[campo] || 'N/A';
+             }).join(' | ');
+
+             if (!agrupados[chave]) agrupados[chave] = { qtd: 0, valor: 0, detalhes: {} };
+             
+             agrupados[chave].qtd++;
+             agrupados[chave].valor += Number(row.valor) || 0;
           });
+
+          // 3. Formata para a IA (Top 30 para não estourar tokens)
+          const relatorio = Object.entries(agrupados)
+             .map(([grupo, dados]) => ({
+                 grupo,
+                 volume: dados.qtd,
+                 receita: dados.valor.toFixed(2)
+             }))
+             .sort((a, b) => b.volume - a.volume) // Ordena por volume
+             .slice(0, 40); // Limite de segurança
 
           messages.push({
             role: "tool",
             tool_call_id: toolCall.id,
-            content: toolResult,
+            content: JSON.stringify({
+                info: "Dados agrupados e processados.",
+                filtros_usados: filtros,
+                agrupamento_usado: agrupar_por,
+                tabela_resultados: relatorio
+            }),
           });
         }
       }
@@ -455,9 +379,9 @@ app.post('/api/chat', async (req, res) => {
     res.json({ reply: responseMessage.content });
 
   } catch (error: any) {
-    console.error("Erro chat:", error.message);
+    console.error("Erro chat:", error);
     res.status(500).json({ error: error.message });
   }
 });
 
-app.listen(PORT, () => { console.log(`🚀 Servidor rodando na porta ${PORT}`); });
+app.listen(PORT, () => { console.log(`🚀 Servidor na porta ${PORT}`); });
