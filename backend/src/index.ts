@@ -1,12 +1,13 @@
+// --- DEBUG DE CRASH (Ajuda a ver erros no Render) ---
 process.on('uncaughtException', (err) => {
   console.error('❌ CRASH CRÍTICO (Uncaught Exception):', err);
-  process.exit(1);
+  // Não damos exit aqui para tentar manter o server vivo se possível, ou o Render reinicia
 });
 
 process.on('unhandledRejection', (reason, promise) => {
   console.error('❌ CRASH CRÍTICO (Unhandled Rejection):', reason);
 });
-
+// ----------------------------------------------------
 
 import express from 'express';
 import cors from 'cors';
@@ -20,6 +21,7 @@ import { generateAnalyticalProfile } from './services/analyticsService';
 import { generateText } from './services/aiProviderService';
 
 const app = express();
+// O Render define a porta automaticamente na variável PORT
 const PORT = process.env.PORT || 3001; 
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
@@ -109,11 +111,10 @@ const normalizeRow = (row: any, mapping: typeof DEFAULT_MAPPING) => {
     };
 };
 
-// Auxiliar para buscar tudo (usado no upload e chat)
 const fetchAllUserOpportunities = async (userId: string) => {
   let allRows: any[] = [];
   let from = 0;
-  const step = 2000; // Aumentei o passo para ser mais rápido
+  const step = 2000; 
   let more = true;
 
   while (more) {
@@ -136,7 +137,7 @@ const fetchAllUserOpportunities = async (userId: string) => {
   return allRows;
 };
 
-// --- ROTA DE UPLOAD (MANTIDA IGUAL) ---
+// --- ROTA DE UPLOAD (Deduplicação + Hash Rigoroso) ---
 app.post('/api/upload', upload.single('file'), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'Arquivo não enviado.' });
 
@@ -148,28 +149,44 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
     const csvFileContent = req.file.buffer.toString('utf-8');
     const parsedData = Papa.parse(csvFileContent, { header: true, skipEmptyLines: true }).data;
 
+    // 1. Normalizar
     const rawRows = parsedData.map((rawRow: any) => {
       const cleanRow = normalizeRow(rawRow, activeMapping);
       const motivo = cleanRow.motivo_perda || '';
-      // Hash rigoroso
-      const signature = `${userId}-${cleanRow.data_criacao}-${cleanRow.nome_cliente}-${cleanRow.valor}-${cleanRow.produto}-${motivo}-${cleanRow.funil}-${cleanRow.status}`.replace(/\s+/g, '');
+      
+      // Hash rigoroso para evitar perda de dados parecidos
+      const signature = `
+          ${userId}-
+          ${cleanRow.data_criacao}-
+          ${cleanRow.nome_cliente}-
+          ${cleanRow.valor}-
+          ${cleanRow.produto}-
+          ${motivo}-
+          ${cleanRow.funil}-
+          ${cleanRow.status}-
+          ${cleanRow.origem_lead}
+      `.replace(/\s+/g, '');
+
       const uniqueHash = crypto.createHash('md5').update(signature).digest('hex');
 
       return { user_id: userId, unique_hash: uniqueHash, ...cleanRow };
     });
 
+    // 2. Deduplicação em memória
     const uniqueRowsMap = new Map();
     rawRows.forEach((row: any) => { uniqueRowsMap.set(row.unique_hash, row); });
     const rowsToUpsert = Array.from(uniqueRowsMap.values());
 
+    // 3. Upsert em Lotes
     const batchSize = 1000;
     for (let i = 0; i < rowsToUpsert.length; i += batchSize) {
       const batch = rowsToUpsert.slice(i, i + batchSize);
       await supabase.from('oportunidades').upsert(batch, { onConflict: 'user_id, unique_hash', ignoreDuplicates: false });
     }
 
+    // 4. Retorno Paginado
     const finalData = await fetchAllUserOpportunities(userId);
-    res.json({ message: 'Processamento concluído', importedData: finalData });
+    res.json({ message: 'Processamento concluído', importedData: finalData, total_banco: finalData.length });
 
   } catch (error: any) {
     console.error('Erro upload:', error);
@@ -177,7 +194,7 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
   }
 });
 
-// --- ROTA ANALYZE (ATUALIZADA COM MOTIVOS) ---
+// --- ROTA ANALYZE ---
 app.post('/api/analyze', async (req, res) => {
   const { provider } = req.body;
   const selectedProvider = provider || 'openai';
@@ -205,7 +222,7 @@ app.post('/api/analyze', async (req, res) => {
     }
     const topMotivos = Object.entries(motivosPerda)
       .sort((a, b) => b[1] - a[1])
-      .slice(0, 7) // Top 7 motivos
+      .slice(0, 7)
       .map(([m, qtd]) => `- ${m}: ${qtd} perdas`);
 
     const prompt = `
@@ -223,16 +240,16 @@ app.post('/api/analyze', async (req, res) => {
       ${JSON.stringify(profile.vendedores.slice(0, 10), null, 2)}
 
       --- MOTIVOS DE PERDA (DIAGNÓSTICO CRÍTICO) ---
-      ${topMotivos.join('\n')}
+      ${topMotivos.length > 0 ? topMotivos.join('\n') : '- Nenhuma perda registrada com motivo informado'}
 
       --- CRONOLOGIA ---
       ${JSON.stringify(profile.timeline, null, 2)}
 
       --- INSTRUÇÕES DO RELATÓRIO ---
       1. **Diagnóstico Executivo:** Qual a saúde real do negócio? A conversão é boa?
-      2. **Análise de Perdas:** Por que estamos perdendo? Relacione os motivos de perda com a eficiência do time ou qualidade do produto.
+      2. **Análise de Perdas:** Por que estamos perdendo? Relacione os motivos.
       3. **Gargalos de Funil:** Identifique onde o processo trava.
-      4. **Plano de Ação:** 3 ações práticas para reduzir os motivos de perda identificados.
+      4. **Plano de Ação:** 3 ações práticas.
     `;
 
     const analysis = await generateText(selectedProvider, prompt);
@@ -243,8 +260,7 @@ app.post('/api/analyze', async (req, res) => {
   }
 });
 
-// --- ROTA CHAT (REVOLUCIONADA COM AGREGAÇÃO) ---
-
+// --- ROTA CHAT (COM AGREGAÇÃO PODEROSA) ---
 const tools = [
   {
     type: "function" as const,
@@ -256,7 +272,6 @@ const tools = [
         properties: {
           filtros: {
             type: "object",
-            description: "Filtros a aplicar nos dados (ex: vendedor='João', status='Perdida', ano=2025)",
             properties: {
               responsavel: { type: "string" },
               funil: { type: "string" },
@@ -270,7 +285,7 @@ const tools = [
           },
           agrupar_por: {
             type: "array",
-            description: "Lista de campos para agrupar/cruzar os dados. Ex: ['mes', 'motivo_perda'] para ver evolução de motivos.",
+            description: "Lista de campos para agrupar/cruzar os dados.",
             items: { type: "string", enum: ["mes", "ano", "responsavel", "funil", "origem", "produto", "estado", "motivo_perda", "status"] }
           }
         },
@@ -288,7 +303,7 @@ app.post('/api/chat', async (req, res) => {
     const userId = user.id;
 
     const messages: any[] = [
-      { role: "system", content: "Você é um Analista de Dados Sênior. Você tem acesso a uma ferramenta poderosa que pode agrupar e cruzar dados. Para perguntas como 'Qual motivo de perda mais comum em SP?', agrupe por ['estado', 'motivo_perda']. Para 'Evolução de vendas', agrupe por ['mes']. SEMPRE use a ferramenta se a pergunta envolver dados." },
+      { role: "system", content: "Você é um Analista de Dados Sênior. Use a ferramenta 'analisar_dados_complexos' para cruzar dados. Para 'motivos de perda', agrupe por ['motivo_perda'] e outros campos relevantes." },
       ...history.map((h: any) => ({ role: h.role === 'model' ? 'assistant' : 'user', content: h.content })),
       { role: "user", content: message }
     ];
@@ -306,36 +321,36 @@ app.post('/api/chat', async (req, res) => {
       messages.push(responseMessage);
 
       for (const toolCallItem of responseMessage.tool_calls) {
-        const toolCall = toolCallItem as any; // <--- CORREÇÃO DO ERRO
+        const toolCall = toolCallItem as any; // Casting para evitar erro TS
 
         if (toolCall.function.name === "analisar_dados_complexos") {
           const args = JSON.parse(toolCall.function.arguments);
           const { filtros = {}, agrupar_por = [] } = args;
 
-          // 1. Busca TUDO do usuário
+          // 1. Busca TUDO
           let query = supabase.from('oportunidades').select('*').eq('user_id', userId);
           
+          // Filtros de otimização SQL
           if (filtros.responsavel) query = query.ilike('responsavel', `%${filtros.responsavel}%`);
           if (filtros.produto) query = query.ilike('produto', `%${filtros.produto}%`);
-          if (filtros.origem) query = query.ilike('origem_lead', `%${filtros.origem}%`);
           if (filtros.status) query = query.eq('status', filtros.status);
-          
-          if (filtros.ano) {
-             query = query.gte('data_criacao', `${filtros.ano}-01-01`).lte('data_criacao', `${filtros.ano}-12-31`);
-          }
+          if (filtros.ano) query = query.gte('data_criacao', `${filtros.ano}-01-01`).lte('data_criacao', `${filtros.ano}-12-31`);
 
           const { data: rows } = await query;
           if (!rows) throw new Error("Erro ao buscar dados.");
 
           // 2. Processamento em Memória
-          const agrupados: Record<string, { qtd: number, valor: number, detalhes: any }> = {};
+          const agrupados: Record<string, { qtd: number, valor: number }> = {};
 
           rows.forEach((row: any) => {
+             // Filtros manuais (Mês, Origem, etc)
              if (filtros.mes) {
                  const d = new Date(row.data_criacao);
                  if (d.getMonth() + 1 !== filtros.mes) return;
              }
+             if (filtros.origem && !row.origem_lead.toLowerCase().includes(filtros.origem.toLowerCase())) return;
 
+             // Chave de agrupamento
              const chave = agrupar_por.map((campo: string) => {
                  if (campo === 'mes') {
                      const d = new Date(row.data_criacao);
@@ -346,13 +361,12 @@ app.post('/api/chat', async (req, res) => {
                  return row[campo] || 'N/A';
              }).join(' | ');
 
-             if (!agrupados[chave]) agrupados[chave] = { qtd: 0, valor: 0, detalhes: {} };
-             
+             if (!agrupados[chave]) agrupados[chave] = { qtd: 0, valor: 0 };
              agrupados[chave].qtd++;
              agrupados[chave].valor += Number(row.valor) || 0;
           });
 
-          // 3. Formata para a IA
+          // 3. Formata Top 40
           const relatorio = Object.entries(agrupados)
              .map(([grupo, dados]) => ({
                  grupo,
@@ -366,10 +380,10 @@ app.post('/api/chat', async (req, res) => {
             role: "tool",
             tool_call_id: toolCall.id,
             content: JSON.stringify({
-                info: "Dados agrupados e processados.",
+                info: "Dados processados.",
                 filtros_usados: filtros,
-                agrupamento_usado: agrupar_por,
-                tabela_resultados: relatorio
+                agrupamento: agrupar_por,
+                resultado: relatorio
             }),
           });
         }
@@ -391,6 +405,7 @@ app.post('/api/chat', async (req, res) => {
   }
 });
 
+// --- INICIALIZAÇÃO DO SERVIDOR ---
 app.listen(PORT, () => { 
-  console.log(`🚀 Servidor rodando na porta ${PORT}`); 
+    console.log(`🚀 Servidor rodando na porta ${PORT}`); 
 });
