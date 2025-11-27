@@ -155,7 +155,18 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
       const cleanRow = normalizeRow(rawRow, activeMapping);
 
       const motivo = cleanRow.motivo_perda || '';
-      const signature = `${userId}-${cleanRow.data_criacao}-${cleanRow.nome_cliente}-${cleanRow.valor}-${cleanRow.produto}-${motivo}`;
+      const signature = `
+          ${userId}-
+          ${cleanRow.data_criacao}-
+          ${cleanRow.nome_cliente}-
+          ${cleanRow.valor}-
+          ${cleanRow.produto}-
+          ${motivo}-
+          ${cleanRow.funil}-
+          ${cleanRow.status}-
+          ${cleanRow.origem_lead}
+        `.replace(/\s+/g, '');
+
       const uniqueHash = crypto.createHash('md5').update(signature).digest('hex');
 
       return {
@@ -194,7 +205,8 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
     res.json({
       message: 'Processamento concluído',
       importedData: finalData,
-      total: finalData.length,
+      total_processado: rowsToUpsert.length,
+      total_banco: finalData.length,
     });
   } catch (error: any) {
     console.error('Erro crítico upload:', error);
