@@ -46,7 +46,7 @@ const DEFAULT_MAPPING = {
     estado: ['Estado', 'UF', 'U.F.', 'State', 'Região'],
     cidade: ['Cidade', 'City', 'Municipio', 'Local'],
     produto: ['Produto', 'Produtos', 'Serviço', 'Item', 'Mercadoria', 'Product'],
-    motivo: ['Motivo', 'Motivo da Perda', 'Reason', 'Observação', 'Obs', 'Detalhe Perda']
+    motivo: ['Motivo', 'Motivo da Perda', 'Reason', 'Observação', 'Obs', 'Detalhe Perda','Motivo.Perda']
 };
 
 const normalizeRow = (row: any, mapping: typeof DEFAULT_MAPPING) => {
