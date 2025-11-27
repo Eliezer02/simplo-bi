@@ -1,3 +1,13 @@
+process.on('uncaughtException', (err) => {
+  console.error('❌ CRASH CRÍTICO (Uncaught Exception):', err);
+  process.exit(1);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('❌ CRASH CRÍTICO (Unhandled Rejection):', reason);
+});
+
+
 import express from 'express';
 import cors from 'cors';
 import multer from 'multer';
