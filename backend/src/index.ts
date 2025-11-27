@@ -12,9 +12,7 @@ import { generateText } from './services/aiProviderService';
 const app = express();
 const PORT = process.env.PORT || 3001; 
 
-
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-
 
 app.use(cors({
     origin: process.env.FRONTEND_URL || '*', 
@@ -26,7 +24,6 @@ const storage = multer.memoryStorage();
 const upload = multer({ storage: storage });
 
 // --- MIDDLEWARE DE SEGURANÇA ---
-// Lê o Token JWT do header e valida no Supabase Auth
 const getUser = async (req: express.Request) => {
   const authHeader = req.headers.authorization;
   if (!authHeader) throw new Error('Acesso negado: Token não fornecido.');
@@ -39,11 +36,12 @@ const getUser = async (req: express.Request) => {
   return user;
 };
 
-// no futuro o usuário definir suas colunas na tela.
-
+// --- CONFIGURAÇÃO DE MAPEAMENTO ---
 const DEFAULT_MAPPING = {
+    protocolo: ['Protocolo', 'ID', 'Código', 'Key', 'Id Negócio'],
     responsavel: ['Responsável', 'Vendedor', 'Owner', 'Agente', 'Rep'],
-    funil: ['Funil', 'Pipeline', 'Etapa', 'Fase'],
+    funil: ['Funil', 'Pipeline'],
+    etapa: ['Etapa', 'Fase', 'Estágio', 'Stage'], // Adicionado Etapa
     status: ['Situação', 'Status', 'Estado', 'Situation'],
     valor: ['Valor', 'Vlr', 'Receita', 'Amount', 'Preço', 'Valor Total'],
     data_criacao: ['Dt.Cad', 'Data Criação', 'Created At', 'Data Entrada', 'Data de Cadastro'],
@@ -81,7 +79,7 @@ const normalizeRow = (row: any, mapping: typeof DEFAULT_MAPPING) => {
              const dateObj = new Date(Number(parts[2]), Number(parts[1]) - 1, Number(parts[0]));
              if (!isNaN(dateObj.getTime())) return dateObj.toISOString();
         }
-        return new Date().toISOString(); // Fallback para hoje
+        return new Date().toISOString(); 
     };
 
     const normalizeStatus = (s: string | null) => {
@@ -93,6 +91,11 @@ const normalizeRow = (row: any, mapping: typeof DEFAULT_MAPPING) => {
     };
 
     return {
+        // Campos auxiliares para Hash (não salvos diretamente se não houver coluna no banco, mas usados na assinatura)
+        _protocolo: find(mapping.protocolo) || '',
+        _etapa: find(mapping.etapa) || '',
+
+        // Campos do Banco
         responsavel: find(mapping.responsavel) || 'N/A',
         funil: find(mapping.funil) || 'Geral',
         status: normalizeStatus(find(mapping.status)),
@@ -108,6 +111,7 @@ const normalizeRow = (row: any, mapping: typeof DEFAULT_MAPPING) => {
     };
 };
 
+// Função auxiliar para paginação no retorno (Supera o limite de 1000)
 const fetchAllUserOpportunities = async (userId: string) => {
   let allRows: any[] = [];
   let from = 0;
@@ -131,11 +135,10 @@ const fetchAllUserOpportunities = async (userId: string) => {
       more = false;
     }
   }
-
   return allRows;
 };
 
-// --- 1. ROTA DE UPLOAD (com deduplicação e hash por linha) ---
+// --- 1. ROTA DE UPLOAD (Deduplicação Inteligente + Upsert) ---
 app.post('/api/upload', upload.single('file'), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'Arquivo não enviado.' });
 
@@ -143,47 +146,51 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
     const user = await getUser(req);
     const userId = user.id;
 
-    const activeMapping = {
-      ...DEFAULT_MAPPING,
-      motivo: ['Motivo', 'Motivo da Perda', 'Reason', 'Observação', 'Obs', 'Detalhe Perda'],
-    };
-
     const csvFileContent = req.file.buffer.toString('utf-8');
     const parsedData = Papa.parse(csvFileContent, { header: true, skipEmptyLines: true }).data;
 
+    // 1. Normalizar e Gerar Hash
     const rawRows = parsedData.map((rawRow: any) => {
-      const cleanRow = normalizeRow(rawRow, activeMapping);
+      const cleanRow = normalizeRow(rawRow, DEFAULT_MAPPING);
 
-      const motivo = cleanRow.motivo_perda || '';
+      // CRIAÇÃO DO HASH (IMPRESSÃO DIGITAL)
+      // Incluímos Protocolo, Etapa, Motivo, Status e Origem para detectar qualquer mudança
       const signature = `
           ${userId}-
+          ${cleanRow._protocolo}-
           ${cleanRow.data_criacao}-
           ${cleanRow.nome_cliente}-
           ${cleanRow.valor}-
           ${cleanRow.produto}-
-          ${motivo}-
+          ${cleanRow.motivo_perda}-
           ${cleanRow.funil}-
+          ${cleanRow._etapa}-
           ${cleanRow.status}-
           ${cleanRow.origem_lead}
         `.replace(/\s+/g, '');
 
       const uniqueHash = crypto.createHash('md5').update(signature).digest('hex');
 
+      // Removemos os campos temporários (_protocolo, _etapa) antes de salvar, 
+      // pois eles não existem na tabela do banco ainda (se quiser salvar, precisaria criar as colunas).
+      const { _protocolo, _etapa, ...rowToSave } = cleanRow;
+
       return {
         user_id: userId,
         unique_hash: uniqueHash,
-        ...cleanRow,
+        ...rowToSave,
       };
     });
 
+    // 2. Deduplicação em Memória (Evita erro do Postgres no mesmo lote)
     const uniqueRowsMap = new Map<string, any>();
     rawRows.forEach((row: any) => {
       uniqueRowsMap.set(row.unique_hash, row);
     });
     const rowsToUpsert = Array.from(uniqueRowsMap.values());
 
+    // 3. Batch Upsert
     const batchSize = 1000;
-
     for (let i = 0; i < rowsToUpsert.length; i += batchSize) {
       const batch = rowsToUpsert.slice(i, i + batchSize);
 
@@ -191,7 +198,7 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
         .from('oportunidades')
         .upsert(batch, {
           onConflict: 'user_id, unique_hash',
-          ignoreDuplicates: false,
+          ignoreDuplicates: false, // Atualiza se mudar algo
         });
 
       if (error) {
@@ -200,6 +207,7 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
       }
     }
 
+    // 4. Retorno Completo (Paginado)
     const finalData = await fetchAllUserOpportunities(userId);
 
     res.json({
@@ -214,21 +222,20 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
   }
 });
 
-
+// --- 2. ROTA DE ANÁLISE GERAL ---
 app.post('/api/analyze', async (req, res) => {
   const { provider } = req.body;
   const selectedProvider = provider || 'openai';
 
   try {
-    const user = await getUser(req); // Autenticação
+    const user = await getUser(req);
     const userId = user.id;
-
 
     const profile = await generateAnalyticalProfile(userId);
     
     if (!profile) return res.status(400).json({ error: 'Sem dados para analisar.' });
 
-    // NOVO: Agrupamento de Motivos de Perda
+    // Buscar Motivos de Perda do Banco
     const { data: rowsPerdidas } = await supabase
       .from('oportunidades')
       .select('motivo_perda')
@@ -245,10 +252,9 @@ app.post('/api/analyze', async (req, res) => {
 
     const topMotivos = Object.entries(motivosPerda)
       .sort((a, b) => b[1] - a[1])
-      .slice(0, 5) // Top 5 motivos
+      .slice(0, 5)
       .map(([m, qtd]) => `- ${m}: ${qtd} perdas`);
 
-    // 3. Prompt Especialista de BI
     const prompt = `
       Você é um **Head de Business Intelligence (BI)** contratado para auditar a operação comercial e da empresa em geral. 
       Sua missão não é descrever números, mas sim **diagnosticar a saúde do negócio, entender o funcionamento, dar insigts e dicas de como melhorar. Você receberá diversos dados faça uma análise profunda e detalhada deles, inclusive relacionando-os**.
@@ -320,25 +326,24 @@ app.post('/api/analyze', async (req, res) => {
   }
 });
 
-// --- 3. ROTA DE CHAT (COM TOOL CALLING) ---
-
+// --- 3. ROTA DE CHAT (CORRIGIDA COM MOTIVOS) ---
 const tools = [
   {
     type: "function" as const,
     function: {
       name: "consultar_dados_vendas",
-      description: "Consulta o banco de dados para responder perguntas específicas.",
+      description: "Consulta o banco de dados para responder perguntas sobre vendas, perdas, motivos, etc.",
       parameters: {
         type: "object",
         properties: {
-          responsavel: { type: "string", description: "Filtro por vendedor." },
-          funil: { type: "string", description: "Filtro por funil." },
-          mes: { type: "integer", description: "Mês (1-12)." },
-          ano: { type: "integer", description: "Ano (2024, 2025)." },
-          origem: { type: "string", description: "Filtro por origem." },
+          responsavel: { type: "string" },
+          funil: { type: "string" },
+          mes: { type: "integer" },
+          ano: { type: "integer" },
+          origem: { type: "string" },
           status: { type: "string", enum: ["Ganha", "Perdida", "Em aberto"] },
-          estado: { type: "string", description: "Sigla do estado (UF)." },
-          produto: { type: "string", description: "Nome do produto." }
+          estado: { type: "string" },
+          produto: { type: "string" }
         },
         required: [],
       },
@@ -350,11 +355,11 @@ app.post('/api/chat', async (req, res) => {
   const { message, history } = req.body;
 
   try {
-    const user = await getUser(req); // Autenticação
+    const user = await getUser(req);
     const userId = user.id;
 
     const messages: any[] = [
-      { role: "system", content: "Você é um assistente de BI. Se perguntarem números, USE 'consultar_dados_vendas'. Se perguntarem mês sem ano, assuma 2025." },
+      { role: "system", content: "Você é um assistente de BI. Use 'consultar_dados_vendas' para buscar números. Se perguntarem o motivo da perda, a ferramenta vai retornar." },
       ...history.map((h: any) => ({ role: h.role === 'model' ? 'assistant' : 'user', content: h.content })),
       { role: "user", content: message }
     ];
@@ -368,7 +373,6 @@ app.post('/api/chat', async (req, res) => {
 
     const responseMessage = completion.choices[0].message;
 
-   
     if (responseMessage.tool_calls && responseMessage.tool_calls.length > 0) {
       messages.push(responseMessage);
       
@@ -378,8 +382,9 @@ app.post('/api/chat', async (req, res) => {
         if (toolCall.function.name === "consultar_dados_vendas") {
           const args = JSON.parse(toolCall.function.arguments);
           
+          // SELECT INCLUINDO MOTIVO_PERDA
           let query = supabase.from('oportunidades')
-            .select('valor, status, data_conclusao, data_criacao')
+            .select('valor, status, data_conclusao, data_criacao, motivo_perda')
             .eq('user_id', userId); 
 
           if (args.responsavel) query = query.ilike('responsavel', `%${args.responsavel}%`);
@@ -389,8 +394,7 @@ app.post('/api/chat', async (req, res) => {
           if (args.produto) query = query.ilike('produto', `%${args.produto}%`);
           if (args.status) query = query.eq('status', args.status);
 
-
-          const isSalesQuery = args.status === 'Ganha' || message.toLowerCase().includes('venda') || message.toLowerCase().includes('receita');
+          const isSalesQuery = args.status === 'Ganha' || message.toLowerCase().includes('venda');
           const dateField = isSalesQuery ? 'data_conclusao' : 'data_criacao';
 
           if (args.mes) {
@@ -405,25 +409,31 @@ app.post('/api/chat', async (req, res) => {
           const { data: rows, error } = await query;
           if (error) throw error;
 
-
+          // CÁLCULO DE MOTIVOS E TOTAIS
+          const motivosStats: Record<string, number> = {};
           const summary = (rows || []).reduce((acc: any, row: any) => {
             const valor = Number(row.valor) || 0;
             acc.total++;
             acc.valor_total += valor;
+            
             if (row.status === 'Ganha') {
               acc.ganhas++;
               acc.valor_ganho += valor;
+            } else if (row.status === 'Perdida') {
+                const m = row.motivo_perda || 'Sem motivo';
+                motivosStats[m] = (motivosStats[m] || 0) + 1;
             }
             return acc;
           }, { total: 0, valor_total: 0, ganhas: 0, valor_ganho: 0 });
 
           const toolResult = JSON.stringify({
-             filtros_aplicados: args,
+             filtros: args,
              resultado: {
                  encontrados: summary.total,
                  ganhas: summary.ganhas,
                  receita_total: summary.valor_ganho.toFixed(2)
-             }
+             },
+             motivos_perda: Object.keys(motivosStats).length > 0 ? motivosStats : null
           });
 
           messages.push({
@@ -449,6 +459,5 @@ app.post('/api/chat', async (req, res) => {
     res.status(500).json({ error: error.message });
   }
 });
-
 
 app.listen(PORT, () => { console.log(`🚀 Servidor rodando na porta ${PORT}`); });
