@@ -2,17 +2,32 @@ import React, { useMemo } from 'react';
 import type { Opportunity } from '../types/types.ts';
 import { 
   AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, 
-  PieChart, Pie, Cell, ComposedChart, Line, Bar, Legend
+  PieChart, Pie, Cell, ComposedChart, Line, Bar, Legend, BarChart
 } from 'recharts';
-import { Target, CheckCircle2, DollarSign, BadgePercent, TrendingUp, Filter, BarChart2, PieChart as PieChartIcon, LineChart as LineChartIcon, SlidersHorizontal, Users,  } from 'lucide-react';
-import { Card, Row, Col, Form, Table, ProgressBar,  } from 'react-bootstrap';
+import { Target, CheckCircle2, DollarSign, BadgePercent, TrendingUp, Filter, BarChart2, PieChart as PieChartIcon, LineChart as LineChartIcon, Users, XCircle } from 'lucide-react';
+import { Card, Row, Col, Form, Table, ProgressBar } from 'react-bootstrap';
 
 interface DashboardProps {
   data: Opportunity[];
 }
 
-const COLORS = ['#10b981', '#ef4444', '#3b82f6', '#f59e0b', '#8b5cf6', '#4f46e5'];
+
 const STATUS_COLORS = { 'Ganha': '#10b981', 'Perdida': '#ef4444', 'Em aberto': '#3b82f6' };
+
+// Ajuste no Label: Se a fatia for muito pequena (< 5%), não mostramos o texto para não encavalar
+const renderCustomizedLabel = ({ cx, cy, midAngle, innerRadius, outerRadius, percent }: any) => {
+  if (percent < 0.05) return null; // Oculta labels de fatias menores que 5%
+
+  const radius = innerRadius + (outerRadius - innerRadius) * 0.5;
+  const x = cx + radius * Math.cos(-midAngle * Math.PI / 180);
+  const y = cy + radius * Math.sin(-midAngle * Math.PI / 180);
+
+  return (
+    <text x={x} y={y} fill="white" textAnchor="middle" dominantBaseline="central" fontSize={12} fontWeight="bold">
+      {`${(percent * 100).toFixed(0)}%`}
+    </text>
+  );
+};
 
 const Dashboard: React.FC<DashboardProps> = ({ data }) => {
   const [selectedResponsavel, setSelectedResponsavel] = React.useState<string>('todos');
@@ -21,7 +36,6 @@ const Dashboard: React.FC<DashboardProps> = ({ data }) => {
   const responsaveis = useMemo(() => ['todos', ...Array.from(new Set(data.map(d => d.responsavel))).filter(Boolean)], [data]);
   const funis = useMemo(() => ['todos', ...Array.from(new Set(data.map(d => d.funil))).filter(Boolean)], [data]);
 
-
   const filteredData = useMemo(() => {
     return data.filter(d => {
       const matchResp = selectedResponsavel === 'todos' || d.responsavel === selectedResponsavel;
@@ -29,7 +43,6 @@ const Dashboard: React.FC<DashboardProps> = ({ data }) => {
       return matchResp && matchFunil;
     });
   }, [data, selectedResponsavel, selectedFunil]);
-
 
   const kpiData = useMemo(() => {
     const ganhas = filteredData.filter(d => d.status === 'Ganha');
@@ -42,7 +55,6 @@ const Dashboard: React.FC<DashboardProps> = ({ data }) => {
       taxaConversao: filteredData.length > 0 ? (ganhas.length / filteredData.length) * 100 : 0,
     };
   }, [filteredData]);
-
 
   const timelineData = useMemo(() => {
     const dataMap: Record<string, { date: Date; criadas: number; ganhas: number }> = {};
@@ -59,8 +71,14 @@ const Dashboard: React.FC<DashboardProps> = ({ data }) => {
             dataMap[kConclusao].ganhas++;
         }
     });
-    return Object.values(dataMap).sort((a, b) => a.date.getTime() - b.date.getTime())
-      .map(d => ({ name: d.date.toLocaleDateString('pt-BR', { month: 'short', year: '2-digit' }), "Criadas": d.criadas, "Vendas": d.ganhas }));
+    return Object.values(dataMap)
+      .sort((a, b) => a.date.getTime() - b.date.getTime())
+      .map(d => ({ 
+        name: d.date.toLocaleDateString('pt-BR', { month: 'short', year: '2-digit' }), 
+        "Criadas": d.criadas, 
+        "Vendas": d.ganhas,
+        "Conversao": d.criadas > 0 ? Number(((d.ganhas / d.criadas) * 100).toFixed(1)) : 0 
+      }));
   }, [filteredData]);
 
   const financialData = useMemo(() => {
@@ -76,7 +94,6 @@ const Dashboard: React.FC<DashboardProps> = ({ data }) => {
       .map(d => ({ name: d.date.toLocaleDateString('pt-BR', { month: 'short', year: '2-digit' }), Receita: d.valor }));
   }, [filteredData]);
 
- 
   const sourcePerformance = useMemo(() => {
       const stats: Record<string, { total: number, ganhas: number, perdidas: number, receita: number }> = {};
       
@@ -103,7 +120,7 @@ const Dashboard: React.FC<DashboardProps> = ({ data }) => {
             conversao: s.total > 0 ? (s.ganhas / s.total) * 100 : 0,
             perda: s.total > 0 ? (s.perdidas / s.total) * 100 : 0
         }))
-        .sort((a, b) => b.receita - a.receita); // Ordena por receita
+        .sort((a, b) => b.receita - a.receita);
   }, [filteredData]);
 
   const statusData = useMemo(() => {
@@ -111,10 +128,28 @@ const Dashboard: React.FC<DashboardProps> = ({ data }) => {
     return Object.entries(statuses).map(([name, value]) => ({ name, value }));
   }, [filteredData]);
 
-  const funnelData = useMemo(() => {
+  // --- CORREÇÃO IMPORTANTE: LÓGICA DE MOTIVOS DE PERDA ---
+  const lossReasonData = useMemo(() => {
+     const reasons: Record<string, number> = {};
+     filteredData.forEach(d => {
+         if (d.status === 'Perdida') {
+             // Normalização agressiva: Verifica nulos, undefined e strings vazias ou só com espaços
+             let motivo = d.motivoPerda;
+             
+             if (!motivo || typeof motivo !== 'string' || motivo.trim() === '' || motivo === 'N/A') {
+                 motivo = '⚠️ Não Preenchido'; // Label clara para o analista
+             } else {
+                 motivo = motivo.trim(); // Remove espaços extras
+             }
 
-     const stages = { 'Total': filteredData.length, 'Ganha': filteredData.filter(d=>d.status==='Ganha').length, 'Perdida': filteredData.filter(d=>d.status==='Perdida').length };
-     return Object.entries(stages).map(([name, value], i) => ({ name, value, fill: [COLORS[2], COLORS[0], COLORS[1]][i] }));
+             reasons[motivo] = (reasons[motivo] || 0) + 1;
+         }
+     });
+
+     return Object.entries(reasons)
+        .map(([name, value]) => ({ name, value }))
+        .sort((a, b) => b.value - a.value)
+        .slice(0, 8); // Aumentei para Top 8
   }, [filteredData]);
 
   return (
@@ -143,7 +178,7 @@ const Dashboard: React.FC<DashboardProps> = ({ data }) => {
         </Card.Body>
       </Card>
 
-      {}
+      {/* KPIS */}
       <Row xs={2} md={3} lg={5} className="g-3">
         <Col><KpiCard icon={Target} title="Oportunidades" value={kpiData.totalOportunidades.toLocaleString()} color="text-primary" /></Col>
         <Col><KpiCard icon={CheckCircle2} title="Vendas" value={kpiData.totalGanhas.toLocaleString()} color="text-success" /></Col>
@@ -152,26 +187,39 @@ const Dashboard: React.FC<DashboardProps> = ({ data }) => {
         <Col><KpiCard icon={BadgePercent} title="Conversão" value={`${kpiData.taxaConversao.toFixed(1)}%`} color="text-info" /></Col>
       </Row>
 
-      {}
       <Row className="g-4">
-        <Col lg={8}><ChartContainer icon={LineChartIcon} title="Volume (Entrada vs Saída)">
+        <Col lg={8}><ChartContainer icon={LineChartIcon} title="Volume & Taxa de Conversão">
             <ResponsiveContainer width="100%" height={300}>
                 <ComposedChart data={timelineData}>
                     <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
                     <XAxis dataKey="name" style={{fontSize:12}} />
-                    <YAxis style={{fontSize:12}} />
+                    <YAxis yAxisId="left" style={{fontSize:12}} />
+                    <YAxis yAxisId="right" orientation="right" unit="%" style={{fontSize:12}} />
                     <Tooltip />
                     <Legend />
-                    <Area type="monotone" dataKey="Criadas" fill="#eff6ff" stroke="#3b82f6" />
-                    <Line type="monotone" dataKey="Vendas" stroke="#10b981" strokeWidth={3} />
+                    <Area yAxisId="left" type="monotone" dataKey="Criadas" fill="#eff6ff" stroke="#3b82f6" name="Oportunidades" />
+                    <Bar yAxisId="left" dataKey="Vendas" fill="#10b981" name="Vendas Realizadas" barSize={20} />
+                    <Line yAxisId="right" type="monotone" dataKey="Conversao" stroke="#f59e0b" strokeWidth={2} name="Taxa Conv. (%)" />
                 </ComposedChart>
             </ResponsiveContainer>
         </ChartContainer></Col>
 
-        <Col lg={4}><ChartContainer icon={PieChartIcon} title="Status Geral">
+        {/* PIE CHART CORRIGIDO: Raio reduzido para evitar corte dos labels */}
+        <Col lg={4}><ChartContainer icon={PieChartIcon} title="Status Geral (%)">
             <ResponsiveContainer width="100%" height={300}>
                 <PieChart>
-                    <Pie data={statusData} dataKey="value" nameKey="name" cx="50%" cy="50%" innerRadius={60} outerRadius={80} paddingAngle={5}>
+                    <Pie 
+                        data={statusData} 
+                        dataKey="value" 
+                        nameKey="name" 
+                        cx="50%" 
+                        cy="50%" 
+                        labelLine={false}
+                        label={renderCustomizedLabel} 
+                        innerRadius={50} // Reduzido de 60 para 50
+                        outerRadius={70} // Reduzido de 80 para 70 (Evita corte nas bordas)
+                        paddingAngle={5}
+                    >
                         {statusData.map((entry) => <Cell key={entry.name} fill={STATUS_COLORS[entry.name as keyof typeof STATUS_COLORS] || '#ccc'} />)}
                     </Pie>
                     <Tooltip />
@@ -181,7 +229,6 @@ const Dashboard: React.FC<DashboardProps> = ({ data }) => {
         </ChartContainer></Col>
       </Row>
 
-      {}
       <Row className="g-4">
         <Col lg={12}>
             <Card className="shadow-lg border-0">
@@ -232,10 +279,9 @@ const Dashboard: React.FC<DashboardProps> = ({ data }) => {
         </Col>
       </Row>
       
-      {}
       <Row className="g-4">
          <Col lg={6}><ChartContainer icon={DollarSign} title="Evolução de Receita">
-             <ResponsiveContainer width="100%" height={250}>
+             <ResponsiveContainer width="100%" height={300}>
                 <AreaChart data={financialData}>
                     <defs><linearGradient id="colorRec" x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor="#10b981" stopOpacity={0.3}/><stop offset="95%" stopColor="#10b981" stopOpacity={0}/></linearGradient></defs>
                     <CartesianGrid strokeDasharray="3 3" />
@@ -247,23 +293,40 @@ const Dashboard: React.FC<DashboardProps> = ({ data }) => {
              </ResponsiveContainer>
          </ChartContainer></Col>
          
-         <Col lg={6}><ChartContainer icon={SlidersHorizontal} title="Funil de Vendas">
-             <ResponsiveContainer width="100%" height={250}>
-                <ComposedChart layout="vertical" data={funnelData}>
-                    <XAxis type="number" hide />
-                    <YAxis dataKey="name" type="category" width={80} style={{fontSize:12, fontWeight:'bold'}} />
-                    <Tooltip />
-                    <Bar dataKey="value" barSize={30} radius={[0,4,4,0]}>
-                        {funnelData.map((e, i) => <Cell key={i} fill={e.fill} />)}
-                    </Bar>
-                </ComposedChart>
+         <Col lg={6}><ChartContainer icon={XCircle} title="Principais Motivos de Perda">
+             <ResponsiveContainer width="100%" height={300}>
+                {lossReasonData.length > 0 ? (
+                    <BarChart layout="vertical" data={lossReasonData} margin={{ top: 5, right: 30, left: 40, bottom: 5 }}>
+                        <CartesianGrid strokeDasharray="3 3" horizontal={false} />
+                        <XAxis type="number" hide />
+                        <YAxis 
+                            dataKey="name" 
+                            type="category" 
+                            width={120} 
+                            style={{fontSize:11, fontWeight: 500}} 
+                            tickFormatter={(val) => val.length > 15 ? `${val.substring(0, 15)}...` : val}
+                        />
+                        <Tooltip cursor={{fill: 'transparent'}} />
+                        <Bar dataKey="value" radius={[0, 4, 4, 0]} barSize={20} name="Qtd. Perdida">
+                           {
+                             // Pintar de cinza se for "Não Preenchido", senão vermelho
+                             lossReasonData.map((entry, index) => (
+                               <Cell key={`cell-${index}`} fill={entry.name === '⚠️ Não Preenchido' ? '#94a3b8' : '#ef4444'} />
+                             ))
+                           }
+                        </Bar>
+                    </BarChart>
+                ) : (
+                    <div className="d-flex align-items-center justify-content-center h-100 text-muted">
+                        Nenhuma perda registrada ou motivos não preenchidos.
+                    </div>
+                )}
              </ResponsiveContainer>
          </ChartContainer></Col>
       </Row>
     </div>
   );
 };
-
 
 const KpiCard: React.FC<{ title: string; value: string; icon: React.ElementType, color: string }> = ({ title, value, icon: Icon, color }) => (
   <Card className="shadow-sm h-100 border-0">

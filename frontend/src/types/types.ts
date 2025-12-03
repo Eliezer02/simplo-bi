@@ -9,6 +9,7 @@ export interface Opportunity {
   estado: string;
   cidade: string;
   produto: string;
+  motivoPerda?: string;
 }
 
 export interface ChatMessage {

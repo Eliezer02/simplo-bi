@@ -100,6 +100,7 @@ const App: React.FC = () => {
         estado: item.estado || 'NA',
         cidade: item.cidade || 'N/A',
         produto: item.produto || 'Geral',
+        motivoPerda: item.motivo_perda || 'Não informado',
       }));
 
       handleDataLoaded(dataFromBackend, file.name);
@@ -148,6 +149,7 @@ const App: React.FC = () => {
     setIsChatLoading(true);
 
     try {
+      // Adiciona placeholder
       setChatHistory(prev => [...prev, { role: 'model', content: '' }]);
 
       const response = await axios.post(
@@ -159,7 +161,28 @@ const App: React.FC = () => {
         { headers: getAuthHeaders() }
       );
 
-      const { reply } = response.data;
+      const { reply, debug } = response.data; // <--- Extrai o DEBUG
+
+      // --- LÓGICA DE CONSOLE LOG ---
+      if (debug && Array.isArray(debug)) {
+          console.groupCollapsed(`🤖 Debug IA: "${message.slice(0, 20)}..."`);
+          debug.forEach((log: any, index: number) => {
+              console.log(`%c Passo ${index + 1}: ${log.step}`, 'color: #0d6efd; font-weight: bold;');
+              if (log.argumentos) {
+                  console.log('📥 Argumentos (Entrada):', log.argumentos);
+              }
+              if (log.output_parcial) {
+                  console.log('📤 Retorno para o GPT (Amostra):');
+                  console.table(log.output_parcial); // Tabela bonita no console
+              }
+              if (log.linhas_processadas !== undefined) {
+                  console.log(`🔢 Linhas analisadas no banco: ${log.linhas_processadas}`);
+              }
+          });
+          console.groupEnd();
+      }
+      // -----------------------------
+
       const botResponse = reply || 'Sem resposta.';
 
       setChatHistory(prev => {
@@ -168,6 +191,7 @@ const App: React.FC = () => {
         return newHistory;
       });
     } catch (error: any) {
+      console.error(error);
       setChatHistory(prev => {
         const newHistory = [...prev];
         newHistory[newHistory.length - 1] = { role: 'model', content: 'Erro técnico na consulta.' };
