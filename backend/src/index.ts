@@ -3,14 +3,14 @@ import cors from 'cors';
 import multer from 'multer';
 import Papa from 'papaparse';
 import OpenAI from 'openai';
-import crypto from 'crypto'; 
+import crypto from 'crypto';
 import { createClient } from '@supabase/supabase-js';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import 'dotenv/config';
 
 // --- CONFIGURAÇÃO INICIAL ---
 const app = express();
-const PORT = process.env.PORT || 3001; 
+const PORT = process.env.PORT || 3001;
 
 // Configuração do Supabase
 const supabaseUrl = process.env.SUPABASE_URL;
@@ -33,7 +33,7 @@ const upload = multer({ storage: storage });
 const getUser = async (req: express.Request) => {
   const authHeader = req.headers.authorization;
   if (!authHeader) throw new Error('Acesso negado: Token não fornecido.');
-  const token = authHeader.split(' ')[1]; 
+  const token = authHeader.split(' ')[1];
   const { data: { user }, error } = await supabase.auth.getUser(token);
   if (error || !user) throw new Error('Sessão inválida ou expirada.');
   return user;
@@ -103,11 +103,12 @@ const generateAnalyticalProfile = async (userId: string) => {
 
   const porVendedor: Record<string, any> = {};
   const porOrigem: Record<string, any> = {};
-  const porFunil: Record<string, any> = {}; 
+  const porFunil: Record<string, any> = {};
   const porMes: Record<string, any> = {};
   const porEstado: Record<string, any> = {};
   const porCidade: Record<string, any> = {};
   const porProduto: Record<string, any> = {};
+  const ciclosDeVenda: number[] = []; // Para calcular média global
 
   rows.forEach((row) => {
     const valor = Number(row.valor) || 0;
@@ -118,7 +119,7 @@ const generateAnalyticalProfile = async (userId: string) => {
     const estado = (row.estado || 'NA').toString().substring(0, 2).toUpperCase();
     const cidade = row.cidade || 'N/A';
     const produto = row.produto || 'Geral';
-    
+
     // Tratamento de datas
     const dataCriacao = new Date(row.data_criacao);
     const mesCriacao = `${(dataCriacao.getMonth() + 1).toString().padStart(2, '0')}/${dataCriacao.getFullYear()}`;
@@ -161,6 +162,11 @@ const generateAnalyticalProfile = async (userId: string) => {
       if (!porMes[mesConclusao]) porMes[mesConclusao] = { criadas: 0, ganhas: 0, valor: 0 };
       porMes[mesConclusao].ganhas++;
       porMes[mesConclusao].valor += valor;
+
+      // Cálculo de ciclo de venda (dias)
+      const diffTime = Math.abs(dataConclusao.getTime() - dataCriacao.getTime());
+      const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+      ciclosDeVenda.push(diffDays);
     } else if (tipo === 'perdida') {
       qtdPerdidas++;
       porVendedor[vendedor].perdidas++;
@@ -169,8 +175,8 @@ const generateAnalyticalProfile = async (userId: string) => {
   });
 
   // Helpers de formatação
-  const calcConv = (g: number, t: number) => t > 0 ? ((g/t)*100).toFixed(1)+'%' : '0%';
-  const sortValor = (obj: any) => Object.entries(obj).map(([k,v]:any) => ({ nome: k, ...v, valor_total: v.valor.toFixed(2), conversao: calcConv(v.ganhas, v.total) })).sort((a:any, b:any) => parseFloat(b.valor_total) - parseFloat(a.valor_total));
+  const calcConv = (g: number, t: number) => t > 0 ? ((g / t) * 100).toFixed(1) + '%' : '0%';
+  const sortValor = (obj: any) => Object.entries(obj).map(([k, v]: any) => ({ nome: k, ...v, valor_total: v.valor.toFixed(2), conversao: calcConv(v.ganhas, v.total) })).sort((a: any, b: any) => parseFloat(b.valor_total) - parseFloat(a.valor_total));
 
   return {
     resumo: {
@@ -179,16 +185,17 @@ const generateAnalyticalProfile = async (userId: string) => {
       perdidas: qtdPerdidas,
       em_aberto: qtdAberto,
       receita_total: totalValor.toFixed(2),
-      ticket_medio: qtdGanhas > 0 ? (totalValor / qtdGanhas).toFixed(2) : '0'
+      ticket_medio: qtdGanhas > 0 ? (totalValor / qtdGanhas).toFixed(2) : '0',
+      ciclo_medio: ciclosDeVenda.length > 0 ? (ciclosDeVenda.reduce((a, b) => a + b, 0) / ciclosDeVenda.length).toFixed(1) : '0'
     },
     funis: sortValor(porFunil),
     vendedores: sortValor(porVendedor),
     origens: sortValor(porOrigem),
-    timeline: Object.entries(porMes).map(([m,d]:any) => ({ mes: m, oportunidades_criadas: d.criadas, vendas_realizadas: d.ganhas, receita: d.valor.toFixed(2) })).sort((a,b) => {
-        const [m1,y1] = a.mes.split('/'); const [m2,y2] = b.mes.split('/');
-        return new Date(Number(y1), Number(m1)-1).getTime() - new Date(Number(y2), Number(m2)-1).getTime();
+    timeline: Object.entries(porMes).map(([m, d]: any) => ({ mes: m, oportunidades_criadas: d.criadas, vendas_realizadas: d.ganhas, receita: d.valor.toFixed(2) })).sort((a, b) => {
+      const [m1, y1] = a.mes.split('/'); const [m2, y2] = b.mes.split('/');
+      return new Date(Number(y1), Number(m1) - 1).getTime() - new Date(Number(y2), Number(m2) - 1).getTime();
     }),
-    geografia: { estados: sortValor(porEstado).slice(0,5), cidades: sortValor(porCidade).slice(0,5) },
+    geografia: { estados: sortValor(porEstado).slice(0, 5), cidades: sortValor(porCidade).slice(0, 5) },
     produtos: sortValor(porProduto)
   };
 };
@@ -197,121 +204,168 @@ const generateAnalyticalProfile = async (userId: string) => {
 
 // Adicione esta função auxiliar para converter dinheiro BR para Number
 const parseBrazilianCurrency = (val: string | null | undefined): number => {
-    if (!val) return 0;
-    const cleanStr = val.toString().trim();
-    if (cleanStr === '') return 0;
-    
-    // Remove R$, espaços e pontos de milhar. Troca vírgula decimal por ponto.
-    // Ex: "R$ 1.250,50" -> "1250.50"
-    const normalized = cleanStr
-        .replace(/[R$\s]/g, '')   // Tira R$ e espaços
-        .replace(/\./g, '')       // Tira pontos de milhar (1.000 vira 1000)
-        .replace(',', '.');       // Troca vírgula por ponto (50,00 vira 50.00)
-        
-    const number = parseFloat(normalized);
-    return isNaN(number) ? 0 : number;
+  if (!val) return 0;
+  const cleanStr = val.toString().trim();
+  if (cleanStr === '') return 0;
+
+  // Remove R$, espaços e pontos de milhar. Troca vírgula decimal por ponto.
+  // Ex: "R$ 1.250,50" -> "1250.50"
+  const normalized = cleanStr
+    .replace(/[R$\s]/g, '')   // Tira R$ e espaços
+    .replace(/\./g, '')       // Tira pontos de milhar (1.000 vira 1000)
+    .replace(',', '.');       // Troca vírgula por ponto (50,00 vira 50.00)
+
+  const number = parseFloat(normalized);
+  return isNaN(number) ? 0 : number;
 };
 
 // Adicione esta função para converter DD/MM/YYYY para Objeto Date seguro
 const parseBrazilianDate = (dateStr: string | null | undefined): Date | null => {
-    if (!dateStr || dateStr.trim() === '') return null;
-    
-    // Tenta formato ISO direto
-    if (dateStr.includes('-')) {
-        const d = new Date(dateStr);
-        return isNaN(d.getTime()) ? null : d;
-    }
+  if (!dateStr || dateStr.trim() === '') return null;
 
-    // Formato DD/MM/YYYY
-    const parts = dateStr.split('/');
-    if (parts.length === 3) {
-        const day = parseInt(parts[0], 10);
-        const month = parseInt(parts[1], 10) - 1; // Mês em JS começa em 0
-        const year = parseInt(parts[2], 10);
-        
-        const d = new Date(year, month, day);
-        return isNaN(d.getTime()) ? null : d;
-    }
-    
-    return null;
+  // Tenta formato ISO direto
+  if (dateStr.includes('-')) {
+    const d = new Date(dateStr);
+    return isNaN(d.getTime()) ? null : d;
+  }
+
+  // Formato DD/MM/YYYY
+  const parts = dateStr.split('/');
+  if (parts.length === 3) {
+    const day = parseInt(parts[0], 10);
+    const month = parseInt(parts[1], 10) - 1; // Mês em JS começa em 0
+    const year = parseInt(parts[2], 10);
+
+    const d = new Date(year, month, day);
+    return isNaN(d.getTime()) ? null : d;
+  }
+
+  return null;
 };
 
 const DEFAULT_MAPPING = {
-    protocolo: ['Protocolo', 'ID', 'Código', 'Key'],
-    responsavel: ['Responsável', 'Vendedor', 'Owner', 'Agente', 'Rep'],
-    funil: ['Funil', 'Pipeline'],
-    etapa: ['Etapa', 'Fase', 'Stage', 'Step'],
-    status: ['Situação', 'Status', 'Estado', 'Situation'],
-    valor: ['Valor', 'Vlr', 'Receita', 'Amount', 'Preço', 'Valor Total', 'Valor Unitário'],
-    data_criacao: ['Dt.Cad', 'Data Criação', 'Created At', 'Data Entrada', 'Data de Cadastro'],
-    data_conclusao: ['Dt.Conq./Perda', 'Data Fechamento', 'Closed At', 'Data Venda', 'Data Conclusão'],
-    origem: ['Origem', 'Source', 'Canal', 'Origem do Lead', 'Fonte'],
-    cliente: ['Cliente', 'Nome', 'Empresa', 'Lead', 'Nome do Cliente'],
-    estado: ['Estado', 'UF', 'U.F.', 'State', 'Região'],
-    cidade: ['Cidade', 'City', 'Municipio', 'Local'],
-    produto: ['Produto', 'Produtos', 'Serviço', 'Item', 'Mercadoria', 'Product'],
-    motivo: ['Motivo', 'Motivo da Perda', 'Reason', 'Observação', 'Obs', 'Detalhe Perda', 'Motivo.Perda']
+  protocolo: ['Protocolo', 'ID', 'Código', 'Key'],
+  responsavel: ['Responsável', 'Vendedor', 'Owner', 'Agente', 'Rep'],
+  funil: ['Funil', 'Pipeline'],
+  etapa: ['Etapa', 'Fase', 'Stage', 'Step'],
+  status: ['Situação', 'Status', 'Estado', 'Situation'],
+  valor: ['Valor', 'Vlr', 'Receita', 'Amount', 'Preço', 'Valor Total', 'Valor Unitário'],
+  data_criacao: ['Dt.Cad', 'Data Criação', 'Created At', 'Data Entrada', 'Data de Cadastro'],
+  data_conclusao: ['Dt.Conq./Perda', 'Data Fechamento', 'Closed At', 'Data Venda', 'Data Conclusão'],
+  origem: ['Origem', 'Source', 'Canal', 'Origem do Lead', 'Fonte'],
+  cliente: ['Cliente', 'Nome', 'Empresa', 'Lead', 'Nome do Cliente'],
+  estado: ['Estado', 'UF', 'U.F.', 'State', 'Região'],
+  cidade: ['Cidade', 'City', 'Municipio', 'Local'],
+  produto: ['Produto', 'Produtos', 'Serviço', 'Item', 'Mercadoria', 'Product'],
+  motivo: ['Motivo', 'Motivo da Perda', 'Reason', 'Observação', 'Obs', 'Detalhe Perda', 'Motivo.Perda']
 };
 
+interface Mapping {
+  protocolo: string;
+  responsavel: string;
+  funil: string;
+  etapa: string;
+  status: string;
+  valor: string;
+  data_criacao: string;
+  data_conclusao: string;
+  origem: string;
+  cliente: string;
+  estado: string;
+  cidade: string;
+  produto: string;
+  motivo: string;
+}
+
 // --- SUBSTITUA A SUA normalizeRow POR ESTA ---
-const normalizeRow = (row: any, mapping: typeof DEFAULT_MAPPING) => {
-    // Função auxiliar de busca (Case Insensitive)
-    const find = (keys: string[]) => {
-        const rowKeys = Object.keys(row);
-        for (const k of keys) {
-            const foundKey = rowKeys.find(rk => rk.toLowerCase().trim() === k.toLowerCase().trim());
-            if (foundKey && row[foundKey]) return row[foundKey].toString().trim();
-        }
-        return null;
-    };
+const normalizeRow = (row: any, mapping: Mapping) => {
+  // Função auxiliar de busca
+  const getVal = (key: string) => {
+    if (!key) return null;
+    return row[key] ? row[key].toString().trim() : null;
+  };
 
-    const statusRaw = find(mapping.status);
-    
-    // Lógica inteligente para pegar valor (prioriza 'Valor', se não tiver, pega 'Valor Unitário')
-    const valorRaw = find(mapping.valor) || find(['Valor Unitário', 'Vlr Unit']); 
-    
-    // Normalização de Datas
-    const dataCriacaoRaw = find(mapping.data_criacao);
-    const dataConclusaoRaw = find(mapping.data_conclusao);
-    
-    const dataCriacao = parseBrazilianDate(dataCriacaoRaw) || new Date();
-    // Se não tiver data de conclusão, mas estiver ganha, assume data de criação como fallback
-    let dataConclusao = parseBrazilianDate(dataConclusaoRaw);
+  const statusRaw = getVal(mapping.status);
+  const valorRaw = getVal(mapping.valor);
 
-    const normalizeStatus = (s: string | null) => {
-        if (!s) return 'Em aberto';
-        const lower = s.toLowerCase();
-        if (lower.includes('ganha') || lower.includes('conquistado') || lower.includes('fechado') || lower.includes('vendido')) return 'Ganha';
-        if (lower.includes('perdida') || lower.includes('perdido') || lower.includes('lost') || lower.includes('desqualificado')) return 'Perdida';
-        return 'Em aberto';
-    };
+  // Normalização de Datas
+  const dataCriacaoRaw = getVal(mapping.data_criacao);
+  const dataConclusaoRaw = getVal(mapping.data_conclusao);
 
-    const statusFinal = normalizeStatus(statusRaw);
+  const dataCriacao = parseBrazilianDate(dataCriacaoRaw) || new Date();
+  // Se não tiver data de conclusão, mas estiver ganha, assume data de criação como fallback
+  let dataConclusao = parseBrazilianDate(dataConclusaoRaw);
 
-    // Se ganhou e não tem data de conclusão, usa a de criação para não zerar relatórios
-    if (statusFinal === 'Ganha' && !dataConclusao) {
-        dataConclusao = dataCriacao;
-    }
+  const normalizeStatus = (s: string | null) => {
+    if (!s) return 'Em aberto';
+    const lower = s.toLowerCase();
+    if (lower.includes('ganha') || lower.includes('conquistado') || lower.includes('fechado') || lower.includes('vendido')) return 'Ganha';
+    if (lower.includes('perdida') || lower.includes('perdido') || lower.includes('lost') || lower.includes('desqualificado')) return 'Perdida';
+    return 'Em aberto';
+  };
 
-    return {
-        protocolo: find(mapping.protocolo) || '',
-        responsavel: find(mapping.responsavel) || 'N/A',
-        funil: find(mapping.funil) || 'Geral',
-        etapa: find(mapping.etapa) || 'Geral',
-        status: statusFinal,
-        valor: parseBrazilianCurrency(valorRaw), // <--- AQUI ESTAVA O ERRO DE VALOR
-        data_criacao: dataCriacao.toISOString(),
-        data_conclusao: dataConclusao ? dataConclusao.toISOString() : null,
-        origem_lead: find(mapping.origem) || 'N/A',
-        nome_cliente: find(mapping.cliente) || 'Anônimo',
-        estado: find(mapping.estado)?.substring(0, 2).toUpperCase() || 'NA',
-        cidade: find(mapping.cidade) || 'N/A',
-        produto: find(mapping.produto) || 'Geral',
-        motivo_perda: find(mapping.motivo) || 'Não informado'
-    };
+  const statusFinal = normalizeStatus(statusRaw);
+
+  // Se ganhou e não tem data de conclusão, usa a de criação para não zerar relatórios
+  if (statusFinal === 'Ganha' && !dataConclusao) {
+    dataConclusao = dataCriacao;
+  }
+
+  return {
+    protocolo: getVal(mapping.protocolo) || '',
+    responsavel: getVal(mapping.responsavel) || 'N/A',
+    funil: getVal(mapping.funil) || 'Geral',
+    etapa: getVal(mapping.etapa) || 'Geral',
+    status: statusFinal,
+    valor: parseBrazilianCurrency(valorRaw),
+    data_criacao: dataCriacao.toISOString(),
+    data_conclusao: dataConclusao ? dataConclusao.toISOString() : null,
+    origem_lead: getVal(mapping.origem) || 'N/A',
+    nome_cliente: getVal(mapping.cliente) || 'Anônimo',
+    estado: getVal(mapping.estado)?.substring(0, 2).toUpperCase() || 'NA',
+    cidade: getVal(mapping.cidade) || 'N/A',
+    produto: getVal(mapping.produto) || 'Geral',
+    motivo_perda: getVal(mapping.motivo) || 'Não informado'
+  };
 };
 
 // --- ROTAS DA API ---
+
+// --- ROTA DE STATUS DE UPLOAD (VERIFICA SE HÁ DADOS) ---
+app.get('/api/upload-status', async (req, res) => {
+  try {
+    const user = await getUser(req);
+    const data = await fetchAllUserOpportunities(user.id);
+    res.json({ data });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// --- ROTA DE DETECÇÃO DE COLUNAS ---
+app.post('/api/detect-columns', upload.single('file'), async (req, res) => {
+  if (!req.file) return res.status(400).json({ error: 'Arquivo não enviado.' });
+
+  try {
+    await getUser(req); // Apenas verifica se está logado
+    const csvFileContent = req.file.buffer.toString('utf-8');
+
+    const parsedResult = Papa.parse(csvFileContent, {
+      header: true,
+      skipEmptyLines: true,
+      preview: 1, // Só precisamos dos headers (primeira linha)
+      delimiter: "",
+    });
+
+    if (parsedResult.meta.fields) {
+      res.json({ columns: parsedResult.meta.fields });
+    } else {
+      res.status(400).json({ error: "Não foi possível detectar colunas no arquivo." });
+    }
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
 
 // --- ROTA DE UPLOAD BLINDADA ---
 app.post('/api/upload', upload.single('file'), async (req, res) => {
@@ -320,39 +374,38 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
   try {
     const user = await getUser(req);
     const userId = user.id;
+    const { mapping, fileName } = req.body; // Mapeamento customizado enviado pelo front
 
-    console.log(`[Upload] Iniciando processamento para user: ${userId}`);
+    console.log(`[Upload] Iniciando processamento para user: ${userId}, Arquivo: ${fileName}`);
 
-    const activeMapping = { ...DEFAULT_MAPPING };
+    // Se o front não mandou mapeamento, tenta usar o automático (fallback segurança)
+    const activeMapping = mapping ? JSON.parse(mapping) : null;
+
+    if (!activeMapping) {
+      return res.status(400).json({ error: "Configuração de mapeamento não fornecida." });
+    }
 
     const csvFileContent = req.file.buffer.toString('utf-8');
-    
-    // 1. Parsing com detecção automática de delimitador
-    const parsedResult = Papa.parse(csvFileContent, { 
-        header: true, 
-        skipEmptyLines: true, 
-        delimiter: "", // <--- String vazia ativa autodetecção (virgula ou ponto e virgula)
+    const batchId = crypto.randomUUID();
+
+    // Registrar o início do upload no histórico (opcional, faremos no final se der certo)
+
+    const parsedResult = Papa.parse(csvFileContent, {
+      header: true,
+      skipEmptyLines: true,
+      delimiter: "",
     });
 
     const parsedData = parsedResult.data;
 
-    console.log(`[Upload] Linhas encontradas no CSV: ${parsedData.length}`);
-
-    if (parsedData.length === 0) {
-        return res.status(400).json({ error: "O CSV parece estar vazio ou o formato não foi reconhecido." });
-    }
-
-    // Debug: Verificar primeira linha para ver se o mapeamento vai funcionar
-    console.log('[Upload] Exemplo de linha crua:', parsedData[0]);
-
-    const rawRows = parsedData.map((rawRow: any, index: number) => {
+    const rawRows = parsedData.map((rawRow: any) => {
       const cleanRow = normalizeRow(rawRow, activeMapping);
-      
-      // Hash inclui index para garantir unicidade mesmo em linhas duplicadas
-      const signature = `${userId}-${cleanRow.protocolo}-${cleanRow.nome_cliente}-${cleanRow.etapa}-${cleanRow.valor}-${index}`;
+
+      // Hash DETERMINÍSTICO (sem index) para evitar duplicidade de CONTEÚDO
+      const signature = `${userId}-${cleanRow.protocolo}-${cleanRow.nome_cliente}-${cleanRow.data_criacao}-${cleanRow.valor}`;
       const uniqueHash = crypto.createHash('md5').update(signature).digest('hex');
 
-      return { user_id: userId, unique_hash: uniqueHash, ...cleanRow };
+      return { user_id: userId, unique_hash: uniqueHash, batch_id: batchId, ...cleanRow };
     });
 
     // Filtra linhas que ficaram totalmente vazias ou inválidas
@@ -369,26 +422,35 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
     const batchSize = 1000;
     for (let i = 0; i < rowsToUpsert.length; i += batchSize) {
       const batch = rowsToUpsert.slice(i, i + batchSize);
-      
+
       const { error } = await supabase
         .from('oportunidades')
         .upsert(batch, { onConflict: 'unique_hash', ignoreDuplicates: false });
 
       if (error) {
-          console.error('[Upload] Erro ao inserir no Supabase:', error);
-          throw new Error(`Erro no Banco de Dados: ${error.message}. Verifique se as colunas 'protocolo' e 'etapa' existem.`);
+        console.error('[Upload] Erro ao inserir no Supabase:', error);
+        throw new Error(`Erro no Banco de Dados: ${error.message}`);
       }
     }
+
+    // Salvar no histórico
+    await supabase.from('import_history').insert({
+      id: batchId,
+      user_id: userId,
+      file_name: fileName || 'Planilha Sem Nome',
+      rows_count: rowsToUpsert.length,
+      created_at: new Date().toISOString()
+    });
 
     const finalData = await fetchAllUserOpportunities(userId);
 
     console.log(`[Upload] Sucesso. Total no banco agora: ${finalData.length}`);
-    
-    res.json({ 
-        message: 'Processamento concluído', 
-        importedRows: rowsToUpsert.length, 
-        totalDb: finalData.length, 
-        importedData: finalData 
+
+    res.json({
+      message: 'Processamento concluído',
+      importedRows: rowsToUpsert.length,
+      totalDb: finalData.length,
+      importedData: finalData
     });
 
   } catch (error: any) {
@@ -406,8 +468,8 @@ app.post('/api/analyze', async (req, res) => {
 
   try {
     const user = await getUser(req);
-    const profile: any = await generateAnalyticalProfile(user.id); 
-    
+    const profile: any = await generateAnalyticalProfile(user.id);
+
     if (!profile) return res.status(400).json({ error: 'Sem dados para analisar.' });
 
     // Preparação dos dados para o Prompt
@@ -536,6 +598,53 @@ app.post('/api/analyze', async (req, res) => {
   }
 });
 
+// --- ROTA DE HISTÓRICO (LISTAGEM) ---
+app.get('/api/history', async (req, res) => {
+  try {
+    const user = await getUser(req);
+    const { data, error } = await supabase
+      .from('import_history')
+      .select('*')
+      .eq('user_id', user.id)
+      .order('created_at', { ascending: false });
+
+    if (error) throw error;
+    res.json(data);
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// --- ROTA DE DELEÇÃO DE LOTE (REVERSÃO) ---
+app.delete('/api/history/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const user = await getUser(req);
+
+    // 1. Remove as oportunidades vinculadas a este lote
+    const { error: oppsError } = await supabase
+      .from('oportunidades')
+      .delete()
+      .eq('batch_id', id)
+      .eq('user_id', user.id);
+
+    if (oppsError) throw oppsError;
+
+    // 2. Remove o registro do histórico
+    const { error: historyError } = await supabase
+      .from('import_history')
+      .delete()
+      .eq('id', id)
+      .eq('user_id', user.id);
+
+    if (historyError) throw historyError;
+
+    res.json({ success: true });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 
 // ==========================================
 // CONFIGURAÇÃO DE TOOLS PARA O CHAT
@@ -556,7 +665,7 @@ const tools = [
               responsavel: { type: "string" },
               status: { type: "string", enum: ["Ganha", "Perdida", "Em aberto"] },
               origem: { type: "string" },
-              ano: { type: "integer", description: "Ano específico para análise (ex: 2024, 2025)" }
+              ano: { type: "integer", description: "Ano específico para análise (ex: 2024, 2025, 2026)" }
             }
           },
           agrupar_por: {
@@ -585,7 +694,7 @@ app.post('/api/chat', async (req, res) => {
     // 1. Injetar Data Atual para evitar alucinação temporal
     const hoje = new Date();
     const dataAtualStr = hoje.toLocaleDateString('pt-BR');
-    
+
     const systemPrompt = `
     Você é o **Simplo BI (Head de Inteligência Comercial)**. Seu perfil é executivo, cirúrgico e baseia-se em dados comparativos. Você não "acha", você "prova". Sempre busque trazer respostas concisas e objetivas dar um sentimento de conversa e não relatório.
     HOJE É: ${dataAtualStr}.
@@ -644,7 +753,7 @@ app.post('/api/chat', async (req, res) => {
 
     // Se o GPT decidiu chamar uma função
     if (responseMessage.tool_calls) {
-      messages.push(responseMessage); 
+      messages.push(responseMessage);
 
       for (const toolCallItem of responseMessage.tool_calls) {
         const toolCall = toolCallItem as any;
@@ -658,135 +767,135 @@ app.post('/api/chat', async (req, res) => {
           const rows = await fetchAllUserOpportunities(userId);
 
           // Inicializa acumuladores (agora com valor_perdido)
-          const agrupados: Record<string, { 
-              qtd: number, 
-              ganhas: number, 
-              perdidas: number, 
-              valor_total: number, 
-              valor_ganho: number, 
-              valor_perdido: number // <--- Importante para análise de perdas
+          const agrupados: Record<string, {
+            qtd: number,
+            ganhas: number,
+            perdidas: number,
+            valor_total: number,
+            valor_ganho: number,
+            valor_perdido: number // <--- Importante para análise de perdas
           }> = {};
-          
+
           let rowCount = 0;
 
           rows.forEach((row: any) => {
-             // --- 1. HIGIENIZAÇÃO (NORMALIZAÇÃO EM TEMPO DE EXECUÇÃO) ---
-             // Isso garante que nunca tenhamos null/undefined nas comparações
-             const rResponsavel = (row.responsavel || 'N/A').trim() || 'N/A';
-             const rOrigem = (row.origem_lead || 'N/A').trim() || 'N/A';
-             const rFunil = (row.funil || 'Geral').trim();
-             const rStatus = (row.status || '').toLowerCase();
-             const rMotivo = (row.motivo_perda || 'Não informado').trim() || 'Não informado';
-             const rProduto = (row.produto || 'Geral').trim() || 'Geral';
-             const rEstado = (row.estado || 'NA').trim() || 'NA'; // Estado geralmente é sigla curta
-             
-             // Conversão Numérica Segura
-             const valor = Number(row.valor) || 0;
+            // --- 1. HIGIENIZAÇÃO (NORMALIZAÇÃO EM TEMPO DE EXECUÇÃO) ---
+            // Isso garante que nunca tenhamos null/undefined nas comparações
+            const rResponsavel = (row.responsavel || 'N/A').trim() || 'N/A';
+            const rOrigem = (row.origem_lead || 'N/A').trim() || 'N/A';
+            const rFunil = (row.funil || 'Geral').trim();
+            const rStatus = (row.status || '').toLowerCase();
+            const rMotivo = (row.motivo_perda || 'Não informado').trim() || 'Não informado';
+            const rProduto = (row.produto || 'Geral').trim() || 'Geral';
+            const rEstado = (row.estado || 'NA').trim() || 'NA'; // Estado geralmente é sigla curta
 
-             // Tratamento de Datas (Crucial para não bugar o 'mes')
-             const dataCriacao = new Date(row.data_criacao);
-             // Se data_conclusao for inválida/null, usa data_criacao como fallback
-             const dataConclusao = row.data_conclusao ? new Date(row.data_conclusao) : dataCriacao;
+            // Conversão Numérica Segura
+            const valor = Number(row.valor) || 0;
 
-             // Definição de Status
-             const isGanha = rStatus.includes('ganha') || rStatus.includes('fechado') || rStatus.includes('conquistado') || rStatus.includes('vendido');
-             const isPerdida = rStatus.includes('perdida') || rStatus.includes('perdido') || rStatus.includes('desqualificado');
+            // Tratamento de Datas (Crucial para não bugar o 'mes')
+            const dataCriacao = new Date(row.data_criacao);
+            // Se data_conclusao for inválida/null, usa data_criacao como fallback
+            const dataConclusao = row.data_conclusao ? new Date(row.data_conclusao) : dataCriacao;
 
-             // --- 2. LÓGICA TEMPORAL (ANO/MÊS) ---
-             // Se é venda ganha, a data relevante é a do FECHAMENTO.
-             // Se é perda ou lead geral, a data relevante é a da CRIAÇÃO.
-             const dataReferencia = (filtros.status === 'Ganha' || isGanha) ? dataConclusao : dataCriacao;
-             
-             // Evita erro de .getFullYear() em data inválida
-             if (isNaN(dataReferencia.getTime())) return; 
+            // Definição de Status
+            const isGanha = rStatus.includes('ganha') || rStatus.includes('fechado') || rStatus.includes('conquistado') || rStatus.includes('vendido');
+            const isPerdida = rStatus.includes('perdida') || rStatus.includes('perdido') || rStatus.includes('desqualificado');
 
-             // --- 3. FILTRAGEM (Case Insensitive e Segura) ---
-             if (filtros.ano && dataReferencia.getFullYear() !== filtros.ano) return;
-             
-             if (filtros.responsavel) {
-                 if (!rResponsavel.toLowerCase().includes(filtros.responsavel.toLowerCase())) return;
-             }
-             
-             if (filtros.status) {
-                 if (filtros.status === 'Ganha' && !isGanha) return;
-                 if (filtros.status === 'Perdida' && !isPerdida) return;
-                 if (filtros.status === 'Em aberto' && (isGanha || isPerdida)) return;
-             }
+            // --- 2. LÓGICA TEMPORAL (ANO/MÊS) ---
+            // Se é venda ganha, a data relevante é a do FECHAMENTO.
+            // Se é perda ou lead geral, a data relevante é a da CRIAÇÃO.
+            const dataReferencia = (filtros.status === 'Ganha' || isGanha) ? dataConclusao : dataCriacao;
 
-             if (filtros.origem) {
-                 if (!rOrigem.toLowerCase().includes(filtros.origem.toLowerCase())) return;
-             }
+            // Evita erro de .getFullYear() em data inválida
+            if (isNaN(dataReferencia.getTime())) return;
 
-             rowCount++;
+            // --- 3. FILTRAGEM (Case Insensitive e Segura) ---
+            if (filtros.ano && dataReferencia.getFullYear() !== filtros.ano) return;
 
-             // --- 4. AGRUPAMENTO (CHAVE COMPOSTA) ---
-             const chave = agrupar_por.map((campo: string) => {
-                 if (campo === 'mes') {
-                     // Formata MM/YYYY
-                     return `${(dataReferencia.getMonth() + 1).toString().padStart(2, '0')}/${dataReferencia.getFullYear()}`;
-                 }
-                 if (campo === 'responsavel') return rResponsavel;
-                 if (campo === 'origem') return rOrigem;
-                 if (campo === 'funil') return rFunil;
-                 if (campo === 'motivo_perda') return rMotivo;
-                 if (campo === 'produto') return rProduto;
-                 if (campo === 'estado') return rEstado;
-                 
-                 // Fallback genérico para campos não mapeados explicitamente acima
-                 return row[campo] || 'N/A';
-             }).join(' | ');
+            if (filtros.responsavel) {
+              if (!rResponsavel.toLowerCase().includes(filtros.responsavel.toLowerCase())) return;
+            }
 
-             // --- 5. AGREGAÇÃO MATEMÁTICA ---
-             if (!agrupados[chave]) {
-                 agrupados[chave] = { 
-                     qtd: 0, 
-                     ganhas: 0, 
-                     perdidas: 0, 
-                     valor_total: 0, 
-                     valor_ganho: 0, 
-                     valor_perdido: 0 
-                 };
-             }
-             
-             agrupados[chave].qtd++;
-             agrupados[chave].valor_total += valor;
+            if (filtros.status) {
+              if (filtros.status === 'Ganha' && !isGanha) return;
+              if (filtros.status === 'Perdida' && !isPerdida) return;
+              if (filtros.status === 'Em aberto' && (isGanha || isPerdida)) return;
+            }
 
-             if (isGanha) {
-                 agrupados[chave].ganhas++;
-                 agrupados[chave].valor_ganho += valor;
-             } else if (isPerdida) {
-                 agrupados[chave].perdidas++;
-                 agrupados[chave].valor_perdido += valor;
-             }
+            if (filtros.origem) {
+              if (!rOrigem.toLowerCase().includes(filtros.origem.toLowerCase())) return;
+            }
+
+            rowCount++;
+
+            // --- 4. AGRUPAMENTO (CHAVE COMPOSTA) ---
+            const chave = agrupar_por.map((campo: string) => {
+              if (campo === 'mes') {
+                // Formata MM/YYYY
+                return `${(dataReferencia.getMonth() + 1).toString().padStart(2, '0')}/${dataReferencia.getFullYear()}`;
+              }
+              if (campo === 'responsavel') return rResponsavel;
+              if (campo === 'origem') return rOrigem;
+              if (campo === 'funil') return rFunil;
+              if (campo === 'motivo_perda') return rMotivo;
+              if (campo === 'produto') return rProduto;
+              if (campo === 'estado') return rEstado;
+
+              // Fallback genérico para campos não mapeados explicitamente acima
+              return row[campo] || 'N/A';
+            }).join(' | ');
+
+            // --- 5. AGREGAÇÃO MATEMÁTICA ---
+            if (!agrupados[chave]) {
+              agrupados[chave] = {
+                qtd: 0,
+                ganhas: 0,
+                perdidas: 0,
+                valor_total: 0,
+                valor_ganho: 0,
+                valor_perdido: 0
+              };
+            }
+
+            agrupados[chave].qtd++;
+            agrupados[chave].valor_total += valor;
+
+            if (isGanha) {
+              agrupados[chave].ganhas++;
+              agrupados[chave].valor_ganho += valor;
+            } else if (isPerdida) {
+              agrupados[chave].perdidas++;
+              agrupados[chave].valor_perdido += valor;
+            }
           });
 
           // --- 6. FORMATAÇÃO FINAL PARA O GPT ---
           const resultadoFinal = Object.entries(agrupados)
-            .map(([k,v]) => ({ 
-                grupo: k, 
-                total_leads: v.qtd, 
-                vendas: v.ganhas,
-                perdas: v.perdidas,
-                receita: Number(v.valor_ganho.toFixed(2)), // Number limpo para o JSON
-                receita_perdida: Number(v.valor_perdido.toFixed(2)),
-                conversao: v.qtd > 0 ? ((v.ganhas / v.qtd) * 100).toFixed(1) + '%' : '0%'
+            .map(([k, v]) => ({
+              grupo: k,
+              total_leads: v.qtd,
+              vendas: v.ganhas,
+              perdas: v.perdidas,
+              receita: Number(v.valor_ganho.toFixed(2)), // Number limpo para o JSON
+              receita_perdida: Number(v.valor_perdido.toFixed(2)),
+              conversao: v.qtd > 0 ? ((v.ganhas / v.qtd) * 100).toFixed(1) + '%' : '0%'
             }))
             // Ordenação Inteligente:
             // 1. Por Receita (maior para menor)
             // 2. Se receita for igual (ex: análise de perdas), ordena por Receita Perdida
             // 3. Se ambos forem zero, ordena por Volume (Quantidade)
-            .sort((a,b) => {
-                return (b.receita - a.receita) || 
-                       (b.receita_perdida - a.receita_perdida) || 
-                       (b.total_leads - a.total_leads);
+            .sort((a, b) => {
+              return (b.receita - a.receita) ||
+                (b.receita_perdida - a.receita_perdida) ||
+                (b.total_leads - a.total_leads);
             })
             .slice(0, 50); // Top 50 para economizar tokens
 
           // LOG DE DEBUG PARA O FRONTEND
-          debugLogs.push({ 
-              step: 'Resultado Calculado (Blindado)', 
-              linhas_consideradas: rowCount, 
-              amostra_output: resultadoFinal.slice(0, 3) 
+          debugLogs.push({
+            step: 'Resultado Calculado (Blindado)',
+            linhas_consideradas: rowCount,
+            amostra_output: resultadoFinal.slice(0, 3)
           });
 
           messages.push({
@@ -803,9 +912,9 @@ app.post('/api/chat', async (req, res) => {
         messages: messages,
       });
 
-      return res.json({ 
-          reply: finalResponse.choices[0].message.content,
-          debug: debugLogs // <--- AQUI ESTÁ O OURO: Enviamos os logs para o Frontend
+      return res.json({
+        reply: finalResponse.choices[0].message.content,
+        debug: debugLogs // <--- AQUI ESTÁ O OURO: Enviamos os logs para o Frontend
       });
     }
 
