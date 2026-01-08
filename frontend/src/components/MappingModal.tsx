@@ -47,7 +47,6 @@ const MappingModal: React.FC<MappingModalProps> = ({ show, columns, onConfirm, o
         setMapping(prev => ({ ...prev, [fieldKey]: column }));
     };
 
-    const isComplete = fields.every(f => mapping[f.key]);
 
     return (
         <Modal show={show} onHide={onCancel} size="lg" centered backdrop="static">

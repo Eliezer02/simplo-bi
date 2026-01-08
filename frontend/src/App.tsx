@@ -11,7 +11,7 @@ import { GeoDashboard } from './components/GeoDashboard';
 import MappingModal from './components/MappingModal.tsx';
 import UploadHistory from './components/UploadHistory.tsx';
 import Help from './components/Help.tsx';
-import { Sparkles, LayoutDashboard, MessageSquare, LogOut, Map, History } from 'lucide-react';
+import { Sparkles, LayoutDashboard, MessageSquare, LogOut, Map } from 'lucide-react';
 import { Container, Button, Navbar, Nav, Form } from 'react-bootstrap';
 
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001';
