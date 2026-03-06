@@ -3,7 +3,7 @@ import { supabase } from '../lib/supabaseClient';
 const fetchAllData = async (userId: string) => {
   let allRows: any[] = [];
   let from = 0;
-  const step = 1000; 
+  const step = 1000;
   let more = true;
 
   while (more) {
@@ -18,7 +18,7 @@ const fetchAllData = async (userId: string) => {
     if (data && data.length > 0) {
       allRows = [...allRows, ...data];
       from += step;
- 
+
       if (data.length < step) more = false;
     } else {
       more = false;
@@ -29,7 +29,7 @@ const fetchAllData = async (userId: string) => {
 
 // ---  FUNÇÃO PRINCIPAL DE GERAÇÃO DE PERFIL ---
 export const generateAnalyticalProfile = async (userId: string) => {
- 
+
   const rows = await fetchAllData(userId);
 
   if (!rows || rows.length === 0) return null;
@@ -43,15 +43,16 @@ export const generateAnalyticalProfile = async (userId: string) => {
 
   const porVendedor: Record<string, any> = {};
   const porOrigem: Record<string, any> = {};
-  const porFunil: Record<string, any> = {}; 
+  const porFunil: Record<string, any> = {};
   const porMes: Record<string, any> = {};
   const porEstado: Record<string, any> = {};
   const porCidade: Record<string, any> = {};
   const porProduto: Record<string, any> = {};
+  const porCliente: Record<string, any> = {};
 
   // ---  LOOP DE PROCESSAMENTO (LINHA A LINHA) ---
   rows.forEach((row) => {
-  
+
     const valor = Number(row.valor) || 0;
     let status = (row.status || '').toLowerCase();
     const vendedor = row.responsavel || 'N/A';
@@ -60,8 +61,9 @@ export const generateAnalyticalProfile = async (userId: string) => {
     const estado = (row.estado || 'NA').toString().substring(0, 2).toUpperCase();
     const cidade = row.cidade || 'N/A';
     const produto = row.produto || 'Geral';
-    
-   
+    const cliente = row.nome_cliente || 'Anônimo';
+
+
     const dataCriacao = new Date(row.data_criacao);
     const mesCriacao = `${(dataCriacao.getMonth() + 1).toString().padStart(2, '0')}/${dataCriacao.getFullYear()}`;
 
@@ -69,24 +71,25 @@ export const generateAnalyticalProfile = async (userId: string) => {
     const dataConclusao = row.data_conclusao ? new Date(row.data_conclusao) : dataCriacao;
     const mesConclusao = `${(dataConclusao.getMonth() + 1).toString().padStart(2, '0')}/${dataConclusao.getFullYear()}`;
 
- 
+
     let tipo = 'aberto';
     if (status.includes('ganha') || status.includes('conquistado') || status.includes('fechado')) tipo = 'ganha';
     else if (status.includes('perdida') || status.includes('perdido') || status.includes('lost')) tipo = 'perdida';
     else qtdAberto++;
 
-  
+
     if (!porVendedor[vendedor]) porVendedor[vendedor] = { ganhas: 0, perdidas: 0, valor: 0, total: 0 };
     if (!porOrigem[origem]) porOrigem[origem] = { ganhas: 0, valor: 0, total: 0 };
     if (!porFunil[funil]) porFunil[funil] = { ganhas: 0, valor: 0, total: 0, perdidas: 0 };
     if (!porEstado[estado]) porEstado[estado] = { ganhas: 0, valor: 0, total: 0 };
     if (!porCidade[cidade]) porCidade[cidade] = { ganhas: 0, valor: 0, total: 0 };
     if (!porProduto[produto]) porProduto[produto] = { ganhas: 0, valor: 0, total: 0 };
-    
-  
+    if (!porCliente[cliente]) porCliente[cliente] = { ganhas: 0, perdidas: 0, valor: 0, total: 0 };
+
+
     if (!porMes[mesCriacao]) porMes[mesCriacao] = { criadas: 0, ganhas: 0, valor: 0 };
 
- 
+
     porVendedor[vendedor].total++;
     porOrigem[origem].total++;
     porFunil[funil].total++;
@@ -94,16 +97,17 @@ export const generateAnalyticalProfile = async (userId: string) => {
     porEstado[estado].total++;
     porCidade[cidade].total++;
     porProduto[produto].total++;
+    porCliente[cliente].total++;
 
- 
+
     if (tipo === 'ganha') {
       qtdGanhas++;
       totalValor += valor;
-      
+
 
       porVendedor[vendedor].ganhas++;
       porVendedor[vendedor].valor += valor;
-      
+
       porOrigem[origem].ganhas++;
       porOrigem[origem].valor += valor;
 
@@ -115,6 +119,8 @@ export const generateAnalyticalProfile = async (userId: string) => {
       porCidade[cidade].valor += valor;
       porProduto[produto].ganhas++;
       porProduto[produto].valor += valor;
+      porCliente[cliente].ganhas++;
+      porCliente[cliente].valor += valor;
 
 
       if (!porMes[mesConclusao]) porMes[mesConclusao] = { criadas: 0, ganhas: 0, valor: 0 };
@@ -125,12 +131,13 @@ export const generateAnalyticalProfile = async (userId: string) => {
       qtdPerdidas++;
       porVendedor[vendedor].perdidas++;
       porFunil[funil].perdidas++;
+      porCliente[cliente].perdidas++;
     }
   });
 
 
 
- 
+
   const topVendedores = Object.entries(porVendedor)
     .map(([nome, d]) => ({
       nome,
@@ -162,16 +169,16 @@ export const generateAnalyticalProfile = async (userId: string) => {
 
 
   const timeline = Object.entries(porMes)
-    .map(([mes, d]) => ({ 
-        mes, 
-        oportunidades_criadas: d.criadas, 
-        vendas_realizadas: d.ganhas, 
-        receita: d.valor.toFixed(2) 
+    .map(([mes, d]) => ({
+      mes,
+      oportunidades_criadas: d.criadas,
+      vendas_realizadas: d.ganhas,
+      receita: d.valor.toFixed(2)
     }))
     .sort((a, b) => {
-        const [m1, y1] = a.mes.split('/');
-        const [m2, y2] = b.mes.split('/');
-        return new Date(Number(y1), Number(m1) - 1).getTime() - new Date(Number(y2), Number(m2) - 1).getTime();
+      const [m1, y1] = a.mes.split('/');
+      const [m2, y2] = b.mes.split('/');
+      return new Date(Number(y1), Number(m1) - 1).getTime() - new Date(Number(y2), Number(m2) - 1).getTime();
     });
 
   const rankingEstados = Object.entries(porEstado)
@@ -213,7 +220,7 @@ export const generateAnalyticalProfile = async (userId: string) => {
       receita_total: totalValor.toFixed(2),
       ticket_medio: qtdGanhas > 0 ? (totalValor / qtdGanhas).toFixed(2) : '0'
     },
-    funis: listaFunis, 
+    funis: listaFunis,
     vendedores: topVendedores,
     origens: topOrigens,
     timeline: timeline,
@@ -221,6 +228,18 @@ export const generateAnalyticalProfile = async (userId: string) => {
       estados: rankingEstados.slice(0, 5),
       cidades: geoCidades.slice(0, 5),
     },
-    produtos: listaProdutos
+    produtos: listaProdutos,
+    clientes: Object.entries(porCliente)
+      .map(([nome, d]) => ({
+        nome,
+        oportunidades: d.total,
+        vendas: d.ganhas,
+        perdidas: d.perdidas,
+        receita: d.valor.toFixed(2),
+        ticket_medio: d.ganhas > 0 ? (d.valor / d.ganhas).toFixed(2) : '0',
+        conversao: d.total > 0 ? ((d.ganhas / d.total) * 100).toFixed(1) + '%' : '0%'
+      }))
+      .sort((a, b) => parseFloat(b.receita) - parseFloat(a.receita))
+      .slice(0, 15)
   };
 };

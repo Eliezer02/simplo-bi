@@ -3,13 +3,14 @@ export interface Opportunity {
   status: 'Ganha' | 'Perdida' | 'Em aberto';
   valor: number;
   dataCriacao: Date;
-  dataConclusao?: Date | null; 
+  dataConclusao?: Date | null;
   origemLead: string;
-  funil: string; 
+  funil: string;
   estado: string;
   cidade: string;
   produto: string;
   motivoPerda?: string;
+  cliente: string;
 }
 
 export interface ChatMessage {

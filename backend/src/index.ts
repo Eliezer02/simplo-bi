@@ -108,6 +108,7 @@ const generateAnalyticalProfile = async (userId: string) => {
   const porEstado: Record<string, any> = {};
   const porCidade: Record<string, any> = {};
   const porProduto: Record<string, any> = {};
+  const porCliente: Record<string, any> = {};
   const ciclosDeVenda: number[] = []; // Para calcular média global
 
   rows.forEach((row) => {
@@ -119,6 +120,7 @@ const generateAnalyticalProfile = async (userId: string) => {
     const estado = (row.estado || 'NA').toString().substring(0, 2).toUpperCase();
     const cidade = row.cidade || 'N/A';
     const produto = row.produto || 'Geral';
+    const cliente = row.nome_cliente || 'Anônimo';
 
     // Tratamento de datas
     const dataCriacao = new Date(row.data_criacao);
@@ -138,6 +140,7 @@ const generateAnalyticalProfile = async (userId: string) => {
     if (!porEstado[estado]) porEstado[estado] = { ganhas: 0, valor: 0, total: 0 };
     if (!porCidade[cidade]) porCidade[cidade] = { ganhas: 0, valor: 0, total: 0 };
     if (!porProduto[produto]) porProduto[produto] = { ganhas: 0, valor: 0, total: 0 };
+    if (!porCliente[cliente]) porCliente[cliente] = { ganhas: 0, perdidas: 0, valor: 0, total: 0 };
     if (!porMes[mesCriacao]) porMes[mesCriacao] = { criadas: 0, ganhas: 0, valor: 0 };
 
     // Incrementos Gerais
@@ -148,6 +151,7 @@ const generateAnalyticalProfile = async (userId: string) => {
     porEstado[estado].total++;
     porCidade[cidade].total++;
     porProduto[produto].total++;
+    porCliente[cliente].total++;
 
     if (tipo === 'ganha') {
       qtdGanhas++;
@@ -158,6 +162,7 @@ const generateAnalyticalProfile = async (userId: string) => {
       porEstado[estado].ganhas++; porEstado[estado].valor += valor;
       porCidade[cidade].ganhas++; porCidade[cidade].valor += valor;
       porProduto[produto].ganhas++; porProduto[produto].valor += valor;
+      porCliente[cliente].ganhas++; porCliente[cliente].valor += valor;
 
       if (!porMes[mesConclusao]) porMes[mesConclusao] = { criadas: 0, ganhas: 0, valor: 0 };
       porMes[mesConclusao].ganhas++;
@@ -171,6 +176,7 @@ const generateAnalyticalProfile = async (userId: string) => {
       qtdPerdidas++;
       porVendedor[vendedor].perdidas++;
       porFunil[funil].perdidas++;
+      porCliente[cliente].perdidas++;
     }
   });
 
@@ -196,7 +202,8 @@ const generateAnalyticalProfile = async (userId: string) => {
       return new Date(Number(y1), Number(m1) - 1).getTime() - new Date(Number(y2), Number(m2) - 1).getTime();
     }),
     geografia: { estados: sortValor(porEstado).slice(0, 5), cidades: sortValor(porCidade).slice(0, 5) },
-    produtos: sortValor(porProduto)
+    produtos: sortValor(porProduto),
+    clientes: sortValor(porCliente).slice(0, 15)
   };
 };
 
@@ -539,6 +546,9 @@ app.post('/api/analyze', async (req, res) => {
 
     - Produtos Top: ${topProdutos}
 
+    7. CARTEIRA DE CLIENTES (Top 15):
+    ${JSON.stringify(profile.clientes?.slice(0, 15) || [], null, 2)}
+
     
 
     --- ESTRUTURA DO RELATÓRIO EXECUTIVO (MARKDOWN) ---
@@ -579,7 +589,14 @@ app.post('/api/analyze', async (req, res) => {
 
     
 
-    **5. Plano de Ação Estratégico (3 Pontos)**
+    **5. Análise de Carteira de Clientes**
+
+    Identifique:
+    - Quais são os 5 clientes mais valiosos (por receita) e qual o risco de concentração?
+    - Há clientes recorrentes (múltiplas oportunidades) com boa conversão? São candidatos a upsell.
+    - Clientes com muitas oportunidades perdidas representam custo oculto de prospecção?
+
+    **6. Plano de Ação Estratégico (3 Pontos)**
 
     Dê 3 ordens práticas para o Diretor Comercial executar HOJE. Seja específico.
 
@@ -665,13 +682,14 @@ const tools = [
               responsavel: { type: "string" },
               status: { type: "string", enum: ["Ganha", "Perdida", "Em aberto"] },
               origem: { type: "string" },
+              cliente: { type: "string", description: "Nome do cliente para filtrar" },
               ano: { type: "integer", description: "Ano específico para análise (ex: 2024, 2025, 2026)" }
             }
           },
           agrupar_por: {
             type: "array",
             description: "Lista de campos para agrupar. Ex: ['mes', 'origem'] cria uma matriz mês x origem.",
-            items: { type: "string", enum: ["mes", "responsavel", "funil", "origem", "motivo_perda", "produto", "estado", "cidade"] }
+            items: { type: "string", enum: ["mes", "responsavel", "funil", "origem", "motivo_perda", "produto", "estado", "cidade", "cliente"] }
           }
         },
         required: ["agrupar_por"],
@@ -787,7 +805,8 @@ app.post('/api/chat', async (req, res) => {
             const rStatus = (row.status || '').toLowerCase();
             const rMotivo = (row.motivo_perda || 'Não informado').trim() || 'Não informado';
             const rProduto = (row.produto || 'Geral').trim() || 'Geral';
-            const rEstado = (row.estado || 'NA').trim() || 'NA'; // Estado geralmente é sigla curta
+            const rEstado = (row.estado || 'NA').trim() || 'NA';
+            const rCliente = (row.nome_cliente || 'Anônimo').trim() || 'Anônimo';
 
             // Conversão Numérica Segura
             const valor = Number(row.valor) || 0;
@@ -826,6 +845,10 @@ app.post('/api/chat', async (req, res) => {
               if (!rOrigem.toLowerCase().includes(filtros.origem.toLowerCase())) return;
             }
 
+            if (filtros.cliente) {
+              if (!rCliente.toLowerCase().includes(filtros.cliente.toLowerCase())) return;
+            }
+
             rowCount++;
 
             // --- 4. AGRUPAMENTO (CHAVE COMPOSTA) ---
@@ -840,6 +863,7 @@ app.post('/api/chat', async (req, res) => {
               if (campo === 'motivo_perda') return rMotivo;
               if (campo === 'produto') return rProduto;
               if (campo === 'estado') return rEstado;
+              if (campo === 'cliente') return rCliente;
 
               // Fallback genérico para campos não mapeados explicitamente acima
               return row[campo] || 'N/A';

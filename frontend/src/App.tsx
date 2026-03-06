@@ -8,15 +8,16 @@ import FileUpload from './components/FileUpload.tsx';
 import Dashboard from './components/Dashboard.tsx';
 import ChatUI from './components/ChatUI.tsx';
 import { GeoDashboard } from './components/GeoDashboard';
+import ClientDashboard from './components/ClientDashboard.tsx';
 import MappingModal from './components/MappingModal.tsx';
 import UploadHistory from './components/UploadHistory.tsx';
 import Help from './components/Help.tsx';
-import { Sparkles, LayoutDashboard, MessageSquare, LogOut, Map } from 'lucide-react';
+import { Sparkles, LayoutDashboard, MessageSquare, LogOut, Map, Building2 } from 'lucide-react';
 import { Container, Button, Navbar, Nav, Form } from 'react-bootstrap';
 
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001';
 
-type ActiveTab = 'dashboard' | 'geo' | 'chat' | 'history' | 'help';
+type ActiveTab = 'dashboard' | 'geo' | 'clients' | 'chat' | 'history' | 'help';
 type AIProvider = 'openai' | 'gemini';
 
 const App: React.FC = () => {
@@ -61,6 +62,7 @@ const App: React.FC = () => {
           cidade: item.cidade || 'N/A',
           produto: item.produto || 'Geral',
           motivoPerda: item.motivo_perda || 'Não informado',
+          cliente: item.nome_cliente || 'Anônimo',
         }));
         setData(mappedData);
         setFileName('Dados do Banco');
@@ -161,6 +163,7 @@ const App: React.FC = () => {
         cidade: item.cidade || 'N/A',
         produto: item.produto || 'Geral',
         motivoPerda: item.motivo_perda || 'Não informado',
+        cliente: item.nome_cliente || 'Anônimo',
       }));
 
       handleDataLoaded(dataFromBackend, pendingFile.name);
@@ -375,6 +378,11 @@ const App: React.FC = () => {
                       </Nav.Link>
                     </Nav.Item>
                     <Nav.Item>
+                      <Nav.Link active={activeTab === 'clients'} onClick={() => setActiveTab('clients')} className="gap-2 d-flex align-items-center justify-content-center">
+                        <Building2 size={18} /> Clientes
+                      </Nav.Link>
+                    </Nav.Item>
+                    <Nav.Item>
                       <Nav.Link active={activeTab === 'chat'} onClick={() => setActiveTab('chat')} className="gap-2 d-flex align-items-center justify-content-center">
                         <MessageSquare size={18} /> Chat com IA
                       </Nav.Link>
@@ -383,6 +391,7 @@ const App: React.FC = () => {
 
                   {activeTab === 'dashboard' && <Dashboard data={data} />}
                   {activeTab === 'geo' && <GeoDashboard data={data} />}
+                  {activeTab === 'clients' && <ClientDashboard data={data} />}
                   {activeTab === 'chat' && (
                     <>
                       {chatHistory.length === 0 && (
