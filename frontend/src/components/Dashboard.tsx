@@ -1,11 +1,11 @@
 import React, { useMemo } from 'react';
 import type { Opportunity } from '../types/types.ts';
-import { 
-  AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, 
-  PieChart, Pie, Cell, ComposedChart, Line, Bar, Legend, BarChart
+import {
+  AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
+  PieChart, Pie, Cell, ComposedChart, Line, Bar, Legend, BarChart, LabelList
 } from 'recharts';
-import { Target, CheckCircle2, DollarSign, BadgePercent, TrendingUp, Filter, BarChart2, PieChart as PieChartIcon, LineChart as LineChartIcon, Users, XCircle } from 'lucide-react';
-import { Card, Row, Col, Form, Table, ProgressBar } from 'react-bootstrap';
+import { Target, CheckCircle2, DollarSign, BadgePercent, TrendingUp, Filter, BarChart2, PieChart as PieChartIcon, LineChart as LineChartIcon, Users, XCircle, Trophy } from 'lucide-react';
+import { Card, Row, Col, Form, Table, ProgressBar, ButtonGroup, Button } from 'react-bootstrap';
 
 interface DashboardProps {
   data: Opportunity[];
@@ -13,6 +13,20 @@ interface DashboardProps {
 
 
 const STATUS_COLORS = { 'Ganha': '#10b981', 'Perdida': '#ef4444', 'Em aberto': '#3b82f6' };
+
+type VendedorMetric = 'receita' | 'ganhas' | 'conversao';
+
+const VENDEDOR_METRICS: Record<VendedorMetric, { label: string; color: string }> = {
+  receita: { label: 'Receita Bruta', color: '#10b981' },
+  ganhas: { label: 'Oportunidades Conquistadas', color: '#3b82f6' },
+  conversao: { label: 'Taxa de Conversão', color: '#f59e0b' },
+};
+
+const formatVendedorMetric = (value: number, metric: VendedorMetric) => {
+  if (metric === 'receita') return value.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL', maximumFractionDigits: 0 });
+  if (metric === 'conversao') return `${value.toFixed(1)}%`;
+  return value.toLocaleString('pt-BR');
+};
 
 // Ajuste no Label: Se a fatia for muito pequena (< 5%), não mostramos o texto para não encavalar
 const renderCustomizedLabel = ({ cx, cy, midAngle, innerRadius, outerRadius, percent }: any) => {
@@ -32,6 +46,7 @@ const renderCustomizedLabel = ({ cx, cy, midAngle, innerRadius, outerRadius, per
 const Dashboard: React.FC<DashboardProps> = ({ data }) => {
   const [selectedResponsavel, setSelectedResponsavel] = React.useState<string>('todos');
   const [selectedFunil, setSelectedFunil] = React.useState<string>('todos');
+  const [vendedorMetric, setVendedorMetric] = React.useState<VendedorMetric>('receita');
   
   const responsaveis = useMemo(() => ['todos', ...Array.from(new Set(data.map(d => d.responsavel))).filter(Boolean)], [data]);
   const funis = useMemo(() => ['todos', ...Array.from(new Set(data.map(d => d.funil))).filter(Boolean)], [data]);
@@ -122,6 +137,29 @@ const Dashboard: React.FC<DashboardProps> = ({ data }) => {
         }))
         .sort((a, b) => b.receita - a.receita);
   }, [filteredData]);
+
+  const vendedorRanking = useMemo(() => {
+    const stats: Record<string, { total: number; ganhas: number; receita: number }> = {};
+    filteredData.forEach(d => {
+      const v = d.responsavel || 'N/A';
+      if (!stats[v]) stats[v] = { total: 0, ganhas: 0, receita: 0 };
+      stats[v].total++;
+      if (d.status === 'Ganha') {
+        stats[v].ganhas++;
+        stats[v].receita += d.valor;
+      }
+    });
+    return Object.entries(stats)
+      .map(([nome, s]) => ({
+        nome,
+        total: s.total,
+        ganhas: s.ganhas,
+        receita: s.receita,
+        conversao: s.total > 0 ? (s.ganhas / s.total) * 100 : 0,
+      }))
+      .sort((a, b) => b[vendedorMetric] - a[vendedorMetric])
+      .slice(0, 10);
+  }, [filteredData, vendedorMetric]);
 
   const statusData = useMemo(() => {
     const statuses = filteredData.reduce((acc, curr) => { acc[curr.status] = (acc[curr.status] || 0) + 1; return acc; }, {} as Record<string, number>);
@@ -227,6 +265,68 @@ const Dashboard: React.FC<DashboardProps> = ({ data }) => {
                 </PieChart>
             </ResponsiveContainer>
         </ChartContainer></Col>
+      </Row>
+
+      {/* RANKING DE VENDEDORES */}
+      <Row className="g-4">
+        <Col lg={12}>
+          <Card className="shadow-lg border-0">
+            <Card.Header className="bg-white border-0 pt-4 px-4 d-flex flex-column flex-md-row justify-content-between align-items-md-center gap-3">
+              <h5 className="fw-bold d-flex align-items-center gap-2 mb-0">
+                <Trophy className="text-warning" size={20} /> Ranking de Vendedores
+              </h5>
+              <ButtonGroup size="sm">
+                {(Object.keys(VENDEDOR_METRICS) as VendedorMetric[]).map(m => (
+                  <Button
+                    key={m}
+                    variant={vendedorMetric === m ? 'primary' : 'outline-secondary'}
+                    onClick={() => setVendedorMetric(m)}
+                  >
+                    {VENDEDOR_METRICS[m].label}
+                  </Button>
+                ))}
+              </ButtonGroup>
+            </Card.Header>
+            <Card.Body className="px-4 pb-3">
+              {vendedorRanking.length > 0 ? (
+                <ResponsiveContainer width="100%" height={Math.max(280, vendedorRanking.length * 46)}>
+                  <BarChart layout="vertical" data={vendedorRanking} margin={{ top: 5, right: 110, left: 20, bottom: 5 }}>
+                    <CartesianGrid strokeDasharray="3 3" horizontal={false} />
+                    <XAxis type="number" hide />
+                    <YAxis
+                      dataKey="nome"
+                      type="category"
+                      width={150}
+                      style={{ fontSize: 12, fontWeight: 500 }}
+                      tickFormatter={(val: string) => val.length > 20 ? `${val.substring(0, 20)}...` : val}
+                    />
+                    <Tooltip
+                      cursor={{ fill: 'transparent' }}
+                      formatter={(v: any) => [formatVendedorMetric(Number(v), vendedorMetric), VENDEDOR_METRICS[vendedorMetric].label]}
+                    />
+                    <Bar dataKey={vendedorMetric} fill={VENDEDOR_METRICS[vendedorMetric].color} radius={[0, 4, 4, 0]} barSize={24} name={VENDEDOR_METRICS[vendedorMetric].label}>
+                      <LabelList
+                        dataKey={vendedorMetric}
+                        position="right"
+                        formatter={(v: any) => formatVendedorMetric(Number(v), vendedorMetric)}
+                        style={{ fontSize: 11, fontWeight: 600, fill: '#374151' }}
+                      />
+                    </Bar>
+                  </BarChart>
+                </ResponsiveContainer>
+              ) : (
+                <div className="d-flex align-items-center justify-content-center text-muted" style={{ height: 280 }}>
+                  Sem dados de vendedores para o filtro atual.
+                </div>
+              )}
+              {vendedorMetric === 'conversao' && (
+                <p className="text-muted small mb-0 mt-2">
+                  * Conversão = oportunidades ganhas ÷ total do vendedor. Vendedores com poucos leads podem distorcer o ranking.
+                </p>
+              )}
+            </Card.Body>
+          </Card>
+        </Col>
       </Row>
 
       <Row className="g-4">

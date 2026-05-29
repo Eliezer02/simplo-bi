@@ -1,7 +1,9 @@
 import React, { useState, useRef, useEffect } from 'react';
 import type { ChatMessage } from '../types/types.ts';
 import { Send, User, Bot } from 'lucide-react';
-import { Form, Button, InputGroup, Spinner, Card } from 'react-bootstrap';
+import { Form, Button, InputGroup, Card } from 'react-bootstrap';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 
 interface ChatUIProps {
   history: ChatMessage[];
@@ -9,49 +11,44 @@ interface ChatUIProps {
   isLoading: boolean;
 }
 
-const formatMessage = (content: string) => {
-    const escapeHtml = (unsafe: string) => {
-        return unsafe.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#039;");
-    }
-    const safeContent = escapeHtml(content);
-    return safeContent
-      .replace(/# (.*)/g, '<h1 class="h4 fw-bold text-dark mt-3 mb-2">$1</h1>')
-      .replace(/## (.*)/g, '<h2 class="h5 fw-semibold text-dark mt-3 mb-2">$1</h2>')
-      .replace(/### (.*)/g, '<h3 class="h6 fw-semibold text-dark mt-2 mb-1">$1</h3>')
-      .replace(/\*\*(.*?)\*\*/g, '<strong class="fw-semibold text-dark">$1</strong>')
-      .replace(/\* (.*)/g, '<li>$1</li>')
-      .replace(/^- (.*)/gm, '<li>$1</li>')
-      .replace(/\n/g, '<br />');
+// Componentes para renderizar o markdown da IA (tabelas, listas, links) com estilo Bootstrap
+const mdComponents = {
+  table: ({ node, ...props }: any) => (
+    <div className="table-responsive my-2">
+      <table className="table table-sm table-bordered align-middle mb-0" {...props} />
+    </div>
+  ),
+  a: ({ node, ...props }: any) => <a target="_blank" rel="noopener noreferrer" {...props} />,
+  h1: ({ node, ...props }: any) => <h4 className="fw-bold mt-2 mb-2" {...props} />,
+  h2: ({ node, ...props }: any) => <h5 className="fw-bold mt-2 mb-2" {...props} />,
+  h3: ({ node, ...props }: any) => <h6 className="fw-semibold mt-2 mb-1" {...props} />,
+  p: ({ node, ...props }: any) => <p className="mb-2" {...props} />,
 };
 
 const ChatUI: React.FC<ChatUIProps> = ({ history, onSendMessage, isLoading }) => {
   const [input, setInput] = useState('');
-  const endOfMessagesRef = useRef<HTMLDivElement>(null);
   const chatContainerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-
     if (chatContainerRef.current) {
-        chatContainerRef.current.scrollTop = chatContainerRef.current.scrollHeight;
+      chatContainerRef.current.scrollTop = chatContainerRef.current.scrollHeight;
     }
   }, [history]);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (input.trim() && !isLoading) {
-      onSendMessage(input.trim()); setInput('');
+      onSendMessage(input.trim());
+      setInput('');
     }
   };
-  
+
   return (
- 
-    <Card className="shadow-lg d-flex flex-column" style={{height: '70vh'}}>
-      
-      {}
-      <Card.Body 
-        ref={chatContainerRef} 
-        className="flex-grow-1 p-3" 
-        style={{ overflowY: 'auto' }} 
+    <Card className="shadow-lg d-flex flex-column" style={{ height: '70vh' }}>
+      <Card.Body
+        ref={chatContainerRef}
+        className="flex-grow-1 p-3"
+        style={{ overflowY: 'auto' }}
       >
         <div className="d-grid gap-3">
           {history.map((msg, index) => (
@@ -62,13 +59,19 @@ const ChatUI: React.FC<ChatUIProps> = ({ history, onSendMessage, isLoading }) =>
                 </div>
               )}
               <div className={`p-3 rounded-3 mw-75 ${msg.role === 'user' ? 'bg-primary text-white' : 'bg-light text-dark'}`}>
-                {msg.content === '' && isLoading ? 
-                  <Spinner animation="grow" size="sm" /> :
-                  <div 
-                    className="chat-bubble-content" 
-                    dangerouslySetInnerHTML={{ __html: formatMessage(msg.content) }} 
-                  />
-                }
+                {msg.content === '' && isLoading ? (
+                  <span className="typing-indicator" aria-label="Gerando resposta">
+                    <span></span><span></span><span></span>
+                  </span>
+                ) : msg.role === 'user' ? (
+                  <span style={{ whiteSpace: 'pre-wrap' }}>{msg.content}</span>
+                ) : (
+                  <div className="chat-bubble-content">
+                    <ReactMarkdown remarkPlugins={[remarkGfm]} components={mdComponents}>
+                      {msg.content}
+                    </ReactMarkdown>
+                  </div>
+                )}
               </div>
               {msg.role === 'user' && (
                 <div className="flex-shrink-0 p-2 rounded-circle bg-secondary-subtle d-flex">
@@ -77,11 +80,9 @@ const ChatUI: React.FC<ChatUIProps> = ({ history, onSendMessage, isLoading }) =>
               )}
             </div>
           ))}
-          <div ref={endOfMessagesRef} />
         </div>
       </Card.Body>
 
-      {}
       <Card.Footer className="p-3 border-top-0 bg-white">
         <Form onSubmit={handleSubmit}>
           <InputGroup>

@@ -1,20 +1,154 @@
+/* ===========================================================
+   Tema base + modernização visual + modo noturno (data-bs-theme)
+   =========================================================== */
 
+:root {
+  --bs-body-font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+
+  /* Paleta clara */
+  --app-bg: #f3f5fa;
+  --app-surface: #ffffff;
+  --app-surface-2: #eef1f8;
+  --app-border: #e6e8f0;
+}
+
+[data-bs-theme="dark"] {
+  /* Paleta escura (charcoal/navy, não preto puro) */
+  --app-bg: #0e1016;
+  --app-surface: #181b24;
+  --app-surface-2: #20242f;
+  --app-border: #2c3140;
+
+  /* Sobrescreve variáveis do Bootstrap para o tema escuro */
+  --bs-body-bg: #0e1016;
+  --bs-body-color: #dfe3ea;
+  --bs-border-color: #2c3140;
+  --bs-emphasis-color: #f5f7fa;
+  --bs-emphasis-color-rgb: 245, 247, 250;
+}
 
 body {
-  background-color: #f8f9fa; 
+  background-color: var(--app-bg);
+  transition: background-color 0.3s ease, color 0.3s ease;
 }
 
-
+/* Transições suaves ao alternar o tema */
+.card,
+.navbar,
+.table,
+.form-control,
+.form-select,
+.btn,
+.dropzone,
 .file-upload-dropzone {
-  border: 2px dashed #ced4da; 
+  transition: background-color 0.3s ease, border-color 0.3s ease, color 0.3s ease, box-shadow 0.3s ease;
+}
+
+/* Sombras mais modernas e suaves */
+.shadow-sm {
+  box-shadow: 0 1px 2px rgba(16, 24, 40, 0.04), 0 2px 6px rgba(16, 24, 40, 0.06) !important;
+}
+.shadow-lg {
+  box-shadow: 0 12px 32px -14px rgba(16, 24, 40, 0.18) !important;
+}
+
+/* Cantos um pouco mais arredondados para um ar moderno */
+.card {
+  border-radius: 1rem;
+}
+
+/* ---------- Modo noturno: adapta utilitários fixos do app ----------
+   Hierarquia: página = mais escura (app-bg); cards/painéis = mais claros (surface);
+   elementos "bg-light" (cabeçalhos de tabela, círculos de ícone, balões) = app-bg p/ contraste. */
+[data-bs-theme="dark"] .bg-white { background-color: var(--app-surface) !important; }
+[data-bs-theme="dark"] .bg-light { background-color: var(--app-bg) !important; }
+[data-bs-theme="dark"] .text-dark { color: var(--bs-emphasis-color) !important; }
+
+[data-bs-theme="dark"] .shadow-sm {
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 2px 8px rgba(0, 0, 0, 0.35) !important;
+}
+[data-bs-theme="dark"] .shadow-lg {
+  box-shadow: 0 14px 36px -14px rgba(0, 0, 0, 0.7) !important;
+}
+
+/* Todos os cards na mesma tonalidade (inclui os sem bg-white) + borda sutil */
+[data-bs-theme="dark"] .card {
+  background-color: var(--app-surface) !important;
+  border: 1px solid var(--app-border) !important;
+}
+
+/* ---------- Dropzone de upload ---------- */
+.file-upload-dropzone {
+  border: 2px dashed #ced4da;
   transition: all 0.2s ease-in-out;
 }
-
 .file-upload-dropzone.dragging {
-  border-color: #0d6efd; 
+  border-color: #0d6efd;
   background-color: #e7f1ff;
 }
+[data-bs-theme="dark"] .file-upload-dropzone {
+  border-color: #3a4150;
+}
+[data-bs-theme="dark"] .file-upload-dropzone.dragging {
+  border-color: #0d6efd;
+  background-color: #16233a !important;
+}
 
+/* ---------- Chat ---------- */
 .chat-bubble-content {
   text-align: justify;
 }
+
+/* Indicador "digitando" (IA processando) */
+.typing-indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 0;
+}
+.typing-indicator span {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background-color: currentColor;
+  display: inline-block;
+  animation: typingBounce 1.2s infinite ease-in-out;
+}
+.typing-indicator span:nth-child(2) { animation-delay: 0.15s; }
+.typing-indicator span:nth-child(3) { animation-delay: 0.3s; }
+@keyframes typingBounce {
+  0%, 60%, 100% { transform: translateY(0); opacity: 0.35; }
+  30% { transform: translateY(-5px); opacity: 1; }
+}
+
+/* ---------- Botão de alternância de tema ---------- */
+.theme-toggle-btn {
+  width: 38px;
+  height: 38px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  border: 1px solid var(--app-border);
+  background: transparent;
+  color: var(--bs-body-color);
+  transition: background-color 0.2s ease, color 0.2s ease, transform 0.2s ease;
+}
+.theme-toggle-btn:hover {
+  background-color: var(--app-surface-2);
+  transform: rotate(-15deg);
+}
+
+/* ---------- Scrollbar discreta ---------- */
+*::-webkit-scrollbar { width: 10px; height: 10px; }
+*::-webkit-scrollbar-thumb {
+  background-color: rgba(120, 130, 150, 0.4);
+  border-radius: 8px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+*::-webkit-scrollbar-thumb:hover { background-color: rgba(120, 130, 150, 0.7); }
+
+/* Animação de entrada já usada no Dashboard */
+.fade-in { animation: fadeIn 0.4s ease; }
+@keyframes fadeIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }

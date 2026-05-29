@@ -22,7 +22,7 @@ const supabase = createClient(supabaseUrl, supabaseKey);
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || '');
 
-app.use(cors({ origin: process.env.FRONTEND_URL || '*', methods: ['GET', 'POST'] }));
+app.use(cors({ origin: process.env.FRONTEND_URL || '*', methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'] }));
 app.use(express.json({ limit: '50mb' })); // Aumentado limite para JSON grandes
 
 const storage = multer.memoryStorage();
@@ -666,289 +666,812 @@ app.delete('/api/history/:id', async (req, res) => {
 // ==========================================
 // CONFIGURAÇÃO DE TOOLS PARA O CHAT
 // ==========================================
+// Schema de filtros compartilhado pelas ferramentas
+const FILTROS_SCHEMA = {
+  type: "object",
+  description: "Filtros opcionais aplicados antes de agregar",
+  properties: {
+    responsavel: { type: "string" },
+    status: { type: "string", enum: ["Ganha", "Perdida", "Em aberto"] },
+    origem: { type: "string" },
+    cliente: { type: "string" },
+    funil: { type: "string" },
+    produto: { type: "string" },
+    estado: { type: "string", description: "UF, ex: SP" },
+    cidade: { type: "string" },
+    motivo_perda: { type: "string" },
+    ano: { type: "integer", description: "Ex: 2026" },
+    mes: { type: "integer", description: "Mês de 1 a 12 (combine com 'ano')" },
+    valor_min: { type: "number" },
+    valor_max: { type: "number" }
+  }
+};
+
 const tools = [
   {
     type: "function" as const,
     function: {
       name: "analisar_dados_complexos",
-      description: "Agrupa, filtra e calcula métricas de vendas. Use para responder perguntas sobre 'melhor mês', 'taxa de conversão por vendedor', 'motivos de perda', 'geografia', etc.",
+      description: "Agrupa e calcula métricas de vendas (receita, conversão, perdas) por uma ou mais dimensões. Use para rankings e matrizes: 'conversão por vendedor', 'receita por funil', 'perdas por motivo', 'mês x origem', etc.",
       parameters: {
         type: "object",
         properties: {
-          filtros: {
-            type: "object",
-            description: "Filtros opcionais a aplicar antes de agrupar",
-            properties: {
-              responsavel: { type: "string" },
-              status: { type: "string", enum: ["Ganha", "Perdida", "Em aberto"] },
-              origem: { type: "string" },
-              cliente: { type: "string", description: "Nome do cliente para filtrar" },
-              ano: { type: "integer", description: "Ano específico para análise (ex: 2024, 2025, 2026)" }
-            }
-          },
+          filtros: FILTROS_SCHEMA,
           agrupar_por: {
             type: "array",
-            description: "Lista de campos para agrupar. Ex: ['mes', 'origem'] cria uma matriz mês x origem.",
-            items: { type: "string", enum: ["mes", "responsavel", "funil", "origem", "motivo_perda", "produto", "estado", "cidade", "cliente"] }
+            description: "Dimensões para agrupar. Ex: ['mes','origem'] cria uma matriz mês x origem.",
+            items: { type: "string", enum: ["mes", "ano", "responsavel", "funil", "etapa", "origem", "motivo_perda", "produto", "estado", "cidade", "cliente"] }
           }
         },
         required: ["agrupar_por"],
       },
     },
   },
+  {
+    type: "function" as const,
+    function: {
+      name: "resumo_geral",
+      description: "KPIs globais da operação: total de oportunidades, ganhas, perdidas, em aberto, receita total, ticket médio, ciclo médio (dias), taxa de conversão e qualidade de preenchimento (dados sombra). Use para perguntas gerais de saúde do negócio ou totais.",
+      parameters: {
+        type: "object",
+        properties: { filtros: FILTROS_SCHEMA },
+      },
+    },
+  },
 ];
 
 // ==========================================
-// ROTA 3: CHAT (COM DEBUG LOG E DATA CORRETA)
+// MOTOR DE ANÁLISE (compartilhado pelas ferramentas)
 // ==========================================
-app.post('/api/chat', async (req, res) => {
-  const { message, history } = req.body;
-  const debugLogs: any[] = []; // Array para armazenar logs da IA
+const incluiTexto = (valor: any, filtro: any) =>
+  !filtro || String(valor ?? '').toLowerCase().includes(String(filtro).toLowerCase());
 
-  try {
-    const user = await getUser(req);
-    const userId = user.id;
+const normalizarLinhaAnalise = (row: any, statusFiltro?: string) => {
+  const status = (row.status || '').toLowerCase();
+  const isGanha = status.includes('ganha') || status.includes('fechado') || status.includes('conquistado') || status.includes('vendido');
+  const isPerdida = status.includes('perdida') || status.includes('perdido') || status.includes('desqualificado');
 
-    // 1. Injetar Data Atual para evitar alucinação temporal
-    const hoje = new Date();
-    const dataAtualStr = hoje.toLocaleDateString('pt-BR');
+  const dataCriacao = new Date(row.data_criacao);
+  const dataConclusao = row.data_conclusao ? new Date(row.data_conclusao) : dataCriacao;
+  const dataRef = (statusFiltro === 'Ganha' || isGanha) ? dataConclusao : dataCriacao;
+  if (isNaN(dataRef.getTime())) return null;
 
-    const systemPrompt = `
-    Você é o **Simplo BI (Head de Inteligência Comercial)**. Seu perfil é executivo, cirúrgico e baseia-se em dados comparativos. Você não "acha", você "prova". Sempre busque trazer respostas concisas e objetivas dar um sentimento de conversa e não relatório.
+  return {
+    responsavel: (row.responsavel || 'N/A').toString().trim() || 'N/A',
+    origem: (row.origem_lead || 'N/A').toString().trim() || 'N/A',
+    funil: (row.funil || 'Geral').toString().trim() || 'Geral',
+    etapa: (row.etapa || 'Geral').toString().trim() || 'Geral',
+    motivo_perda: (row.motivo_perda || 'Não informado').toString().trim() || 'Não informado',
+    produto: (row.produto || 'Geral').toString().trim() || 'Geral',
+    estado: (row.estado || 'NA').toString().trim() || 'NA',
+    cidade: (row.cidade || 'N/A').toString().trim() || 'N/A',
+    cliente: (row.nome_cliente || 'Anônimo').toString().trim() || 'Anônimo',
+    valor: Number(row.valor) || 0,
+    isGanha, isPerdida,
+    dataCriacao, dataConclusao,
+    ano: dataRef.getFullYear(),
+    mes: `${(dataRef.getMonth() + 1).toString().padStart(2, '0')}/${dataRef.getFullYear()}`
+  };
+};
+
+const passaFiltros = (r: any, f: any = {}) => {
+  if (f.ano && r.ano !== f.ano) return false;
+  if (f.mes && parseInt(r.mes.split('/')[0], 10) !== f.mes) return false;
+  if (!incluiTexto(r.responsavel, f.responsavel)) return false;
+  if (!incluiTexto(r.origem, f.origem)) return false;
+  if (!incluiTexto(r.cliente, f.cliente)) return false;
+  if (!incluiTexto(r.funil, f.funil)) return false;
+  if (!incluiTexto(r.produto, f.produto)) return false;
+  if (!incluiTexto(r.estado, f.estado)) return false;
+  if (!incluiTexto(r.cidade, f.cidade)) return false;
+  if (!incluiTexto(r.motivo_perda, f.motivo_perda)) return false;
+  if (f.status === 'Ganha' && !r.isGanha) return false;
+  if (f.status === 'Perdida' && !r.isPerdida) return false;
+  if (f.status === 'Em aberto' && (r.isGanha || r.isPerdida)) return false;
+  if (f.valor_min != null && r.valor < f.valor_min) return false;
+  if (f.valor_max != null && r.valor > f.valor_max) return false;
+  return true;
+};
+
+const analisarDados = (rows: any[], args: any) => {
+  const filtros = args.filtros || {};
+  const agrupar_por: string[] = (args.agrupar_por && args.agrupar_por.length) ? args.agrupar_por : ['responsavel'];
+  const grupos: Record<string, any> = {};
+  let rowCount = 0;
+
+  rows.forEach((row) => {
+    const r = normalizarLinhaAnalise(row, filtros.status);
+    if (!r || !passaFiltros(r, filtros)) return;
+    rowCount++;
+    const chave = agrupar_por.map((c) => (r as any)[c] ?? 'N/A').join(' | ');
+    if (!grupos[chave]) grupos[chave] = { qtd: 0, ganhas: 0, perdidas: 0, valor_ganho: 0, valor_perdido: 0 };
+    grupos[chave].qtd++;
+    if (r.isGanha) { grupos[chave].ganhas++; grupos[chave].valor_ganho += r.valor; }
+    else if (r.isPerdida) { grupos[chave].perdidas++; grupos[chave].valor_perdido += r.valor; }
+  });
+
+  const resultado = Object.entries(grupos)
+    .map(([grupo, v]: any) => ({
+      grupo,
+      total_leads: v.qtd,
+      vendas: v.ganhas,
+      perdas: v.perdidas,
+      receita: Number(v.valor_ganho.toFixed(2)),
+      receita_perdida: Number(v.valor_perdido.toFixed(2)),
+      conversao: v.qtd > 0 ? ((v.ganhas / v.qtd) * 100).toFixed(1) + '%' : '0%'
+    }))
+    .sort((a, b) => (b.receita - a.receita) || (b.receita_perdida - a.receita_perdida) || (b.total_leads - a.total_leads))
+    .slice(0, 50);
+
+  return { resultado, rowCount };
+};
+
+const resumoGeral = (rows: any[], args: any) => {
+  const filtros = args.filtros || {};
+  let total = 0, ganhas = 0, perdidas = 0, aberto = 0, receita = 0, semMotivo = 0, ganhasValorZero = 0;
+  const ciclos: number[] = [];
+
+  rows.forEach((row) => {
+    const r = normalizarLinhaAnalise(row, filtros.status);
+    if (!r || !passaFiltros(r, filtros)) return;
+    total++;
+    if (r.isGanha) {
+      ganhas++; receita += r.valor;
+      if (r.valor === 0) ganhasValorZero++;
+      if (!isNaN(r.dataCriacao.getTime()) && !isNaN(r.dataConclusao.getTime())) {
+        ciclos.push(Math.max(0, Math.ceil((r.dataConclusao.getTime() - r.dataCriacao.getTime()) / 86400000)));
+      }
+    } else if (r.isPerdida) {
+      perdidas++;
+      if (r.motivo_perda === 'Não informado') semMotivo++;
+    } else {
+      aberto++;
+    }
+  });
+
+  const resultado = {
+    total_oportunidades: total,
+    ganhas, perdidas, em_aberto: aberto,
+    receita_total: Number(receita.toFixed(2)),
+    ticket_medio: ganhas > 0 ? Number((receita / ganhas).toFixed(2)) : 0,
+    ciclo_medio_dias: ciclos.length ? Number((ciclos.reduce((a, b) => a + b, 0) / ciclos.length).toFixed(1)) : 0,
+    taxa_conversao: total > 0 ? ((ganhas / total) * 100).toFixed(1) + '%' : '0%',
+    qualidade_dados: {
+      perdas_sem_motivo: perdidas > 0 ? ((semMotivo / perdidas) * 100).toFixed(1) + '%' : '0%',
+      ganhas_com_valor_zero: ganhas > 0 ? ((ganhasValorZero / ganhas) * 100).toFixed(1) + '%' : '0%'
+    }
+  };
+  return { resultado, rowCount: total };
+};
+
+const executarTool = (name: string, args: any, rows: any[]) => {
+  if (name === 'analisar_dados_complexos') return analisarDados(rows, args);
+  if (name === 'resumo_geral') return resumoGeral(rows, args);
+  return { resultado: { erro: `Ferramenta desconhecida: ${name}` }, rowCount: 0 };
+};
+
+const buildChatSystemPrompt = () => {
+  const dataAtualStr = new Date().toLocaleDateString('pt-BR');
+  return `
+    Você é o **Simplo BI (Head de Inteligência Comercial)**. Seu perfil é executivo, cirúrgico e baseia-se em dados comparativos. Você não "acha", você "prova". Sempre busque trazer respostas concisas e objetivas, dando sensação de conversa e não de relatório.
     HOJE É: ${dataAtualStr}.
-  
+
     --- 🧠 PROTOCOLO DE INTELIGÊNCIA COMPARATIVA ---
-  
+
     1. **REGRA DE OURO: DIAGNÓSTICO POR CONTRASTE (BENCHMARKING)**
        - **Nunca julgue um vendedor isoladamente.** Sempre compare com a MÉDIA DO TIME e com o tipo de LEAD.
-       - **Como identificar quem "Queima Leads" (Churn de Oportunidade):**
-         - *Cenário A:* Se Vendedor X converte 2% e o resto do time converte 15% nos mesmos canais -> **Problema de Performance do Vendedor (Treinamento necessário).**
-         - *Cenário B:* Se TODOS os vendedores convertem 2% -> **Problema na Qualidade do Lead (Marketing) ou no Produto.** Não culpe o time.
-       - **Contexto de Origem:** Não compare a conversão de um vendedor que recebe "Indicação" (fácil venda) com um que prospecta "Cold Call" (difícil venda).
-  
-    2. **DETECÇÃO DE "DADOS SOMBRA" & CULTURA DE CRM (CRÍTICO)**
-       - Antes de qualquer análise, verifique a integridade dos dados.
-       - **Sintoma:** Alta incidência de campos "N/A", "Não Informado" ou valores financeiros zerados (R$ 0,00) em oportunidades ganhas/perdidas.
-       - **Diagnóstico Obrigatório:** Isso indica **Falha de Processo da Equipe**. O vendedor não está preenchendo o CRM.
-       - **Ação:** Você DEVE alertar o gestor explicitamente. 
-       -Sempre alerte para o número de preenchimento incorreto.
-         - *Exemplo de Frase:* "🚨 **Alerta de Processo:** 30% das suas oportunidades estão sem 'Motivo de Perda' e várias vendas constam com valor R$ 0,00. **Sua equipe não está alimentando o CRM corretamente.** Isso sabota sua inteligência. Recomendo auditar o time e tornar esses campos obrigatórios na ferramenta."
-  
+       - Se Vendedor X converte 2% e o resto do time converte 15% nos mesmos canais -> **Problema de Performance do Vendedor.**
+       - Se TODOS convertem 2% -> **Problema na Qualidade do Lead (Marketing) ou no Produto.** Não culpe o time.
+
+    2. **DETECÇÃO DE "DADOS SOMBRA" & CULTURA DE CRM**
+       - Use a ferramenta resumo_geral para ver a qualidade de preenchimento.
+       - Alta % de perdas sem motivo ou ganhas com valor R$ 0,00 indica **Falha de Processo da Equipe**. Alerte o gestor explicitamente.
+
     3. **ESTRUTURA DE RESPOSTA EXECUTIVA (CONCISÃO)**
-       - **Direto ao Ponto (B.L.U.F.):** Comece com a conclusão. Não enrole.
-       - **Sem Textão:** Use tópicos (Bullet points) e Tabelas compactas.
-       - **Formato Padrão:**
-         1. **Veredito:** A resposta direta à pergunta.
-         2. **Evidência:** Os números comparativos que provam (Ex: "João: 5% vs Média Time: 12%").
-         3. **Ação/Correção:** O que fazer agora (seja com o vendedor, com o marketing ou com o preenchimento de dados).
-  
+       - **Direto ao Ponto (B.L.U.F.):** Comece com a conclusão.
+       - Use tópicos e **tabelas markdown** compactas quando comparar itens.
+       - Formato: 1) Veredito, 2) Evidência (números comparativos), 3) Ação/Correção.
+
     4. **MULTIFATORIALIDADE**
-       - Considere a tríade: **Volume de Leads** x **Taxa de Conversão** x **Ticket Médio**.
-       - Um vendedor pode ter receita baixa, mas conversão alta (recebe poucos leads). Nesse caso, a culpa é da distribuição, não dele.
-  
-    --- EXEMPLO DE RACIOCÍNIO ESPERADO ---
-    *Usuário:* "Por que perdemos tantas vendas em Março?"
-    *Análise:* Você vê que 80% das perdas estão sem motivo preenchido.
-    *Resposta:* "Não é possível diagnosticar a causa raiz mercadológica porque **80% das perdas não têm o 'Motivo' preenchido pelos vendedores**. 
-    **Ação Imediata:** A equipe de vendas precisa ser cobrada para justificar as perdas (Preço? Concorrência?), caso contrário, você continuará cego sobre os gargalos."
+       - Considere a tríade: Volume de Leads x Taxa de Conversão x Ticket Médio.
+
+    --- FERRAMENTAS ---
+    - Use **resumo_geral** para totais e saúde do negócio.
+    - Use **analisar_dados_complexos** para rankings/matrizes por dimensão.
+    - Você pode chamar ferramentas mais de uma vez para comparar recortes antes de concluir.
+    - Baseie-se SOMENTE nos números retornados pelas ferramentas. Nunca invente valores.
   `;
+};
 
-    const messages: any[] = [
-      { role: "system", content: systemPrompt },
-      ...history.map((h: any) => ({ role: h.role === 'model' ? 'assistant' : 'user', content: h.content })),
-      { role: "user", content: message }
-    ];
+// ==========================================
+// EXECUÇÃO POR PROVEDOR (com streaming)
+// ==========================================
+const runOpenAiChat = async (opts: {
+  systemPrompt: string; history: any[]; message: string; rows: any[];
+  send: (o: any) => void; debugLogs: any[];
+}) => {
+  const { systemPrompt, history, message, rows, send, debugLogs } = opts;
+  const messages: any[] = [
+    { role: 'system', content: systemPrompt },
+    ...history.map((h: any) => ({ role: h.role === 'model' ? 'assistant' : 'user', content: h.content })),
+    { role: 'user', content: message }
+  ];
 
-    // Primeira chamada ao GPT
-    const completion = await openai.chat.completions.create({
-      model: "gpt-4o",
-      messages: messages,
-      tools: tools,
-      tool_choice: "auto",
+  for (let round = 0; round < 4; round++) {
+    const stream = await openai.chat.completions.create({
+      model: 'gpt-4o', messages, tools, tool_choice: 'auto', stream: true
     });
 
-    const responseMessage = completion.choices[0].message;
+    let content = '';
+    const toolCalls: any[] = [];
 
-    // Se o GPT decidiu chamar uma função
-    if (responseMessage.tool_calls) {
-      messages.push(responseMessage);
-
-      for (const toolCallItem of responseMessage.tool_calls) {
-        const toolCall = toolCallItem as any;
-
-        if (toolCall.function.name === "analisar_dados_complexos") {
-          const args = JSON.parse(toolCall.function.arguments);
-          const { filtros = {}, agrupar_por = [] } = args;
-
-          debugLogs.push({ step: 'GPT solicitou função', tool: 'analisar_dados_complexos', argumentos: args });
-
-          const rows = await fetchAllUserOpportunities(userId);
-
-          // Inicializa acumuladores (agora com valor_perdido)
-          const agrupados: Record<string, {
-            qtd: number,
-            ganhas: number,
-            perdidas: number,
-            valor_total: number,
-            valor_ganho: number,
-            valor_perdido: number // <--- Importante para análise de perdas
-          }> = {};
-
-          let rowCount = 0;
-
-          rows.forEach((row: any) => {
-            // --- 1. HIGIENIZAÇÃO (NORMALIZAÇÃO EM TEMPO DE EXECUÇÃO) ---
-            // Isso garante que nunca tenhamos null/undefined nas comparações
-            const rResponsavel = (row.responsavel || 'N/A').trim() || 'N/A';
-            const rOrigem = (row.origem_lead || 'N/A').trim() || 'N/A';
-            const rFunil = (row.funil || 'Geral').trim();
-            const rStatus = (row.status || '').toLowerCase();
-            const rMotivo = (row.motivo_perda || 'Não informado').trim() || 'Não informado';
-            const rProduto = (row.produto || 'Geral').trim() || 'Geral';
-            const rEstado = (row.estado || 'NA').trim() || 'NA';
-            const rCliente = (row.nome_cliente || 'Anônimo').trim() || 'Anônimo';
-
-            // Conversão Numérica Segura
-            const valor = Number(row.valor) || 0;
-
-            // Tratamento de Datas (Crucial para não bugar o 'mes')
-            const dataCriacao = new Date(row.data_criacao);
-            // Se data_conclusao for inválida/null, usa data_criacao como fallback
-            const dataConclusao = row.data_conclusao ? new Date(row.data_conclusao) : dataCriacao;
-
-            // Definição de Status
-            const isGanha = rStatus.includes('ganha') || rStatus.includes('fechado') || rStatus.includes('conquistado') || rStatus.includes('vendido');
-            const isPerdida = rStatus.includes('perdida') || rStatus.includes('perdido') || rStatus.includes('desqualificado');
-
-            // --- 2. LÓGICA TEMPORAL (ANO/MÊS) ---
-            // Se é venda ganha, a data relevante é a do FECHAMENTO.
-            // Se é perda ou lead geral, a data relevante é a da CRIAÇÃO.
-            const dataReferencia = (filtros.status === 'Ganha' || isGanha) ? dataConclusao : dataCriacao;
-
-            // Evita erro de .getFullYear() em data inválida
-            if (isNaN(dataReferencia.getTime())) return;
-
-            // --- 3. FILTRAGEM (Case Insensitive e Segura) ---
-            if (filtros.ano && dataReferencia.getFullYear() !== filtros.ano) return;
-
-            if (filtros.responsavel) {
-              if (!rResponsavel.toLowerCase().includes(filtros.responsavel.toLowerCase())) return;
-            }
-
-            if (filtros.status) {
-              if (filtros.status === 'Ganha' && !isGanha) return;
-              if (filtros.status === 'Perdida' && !isPerdida) return;
-              if (filtros.status === 'Em aberto' && (isGanha || isPerdida)) return;
-            }
-
-            if (filtros.origem) {
-              if (!rOrigem.toLowerCase().includes(filtros.origem.toLowerCase())) return;
-            }
-
-            if (filtros.cliente) {
-              if (!rCliente.toLowerCase().includes(filtros.cliente.toLowerCase())) return;
-            }
-
-            rowCount++;
-
-            // --- 4. AGRUPAMENTO (CHAVE COMPOSTA) ---
-            const chave = agrupar_por.map((campo: string) => {
-              if (campo === 'mes') {
-                // Formata MM/YYYY
-                return `${(dataReferencia.getMonth() + 1).toString().padStart(2, '0')}/${dataReferencia.getFullYear()}`;
-              }
-              if (campo === 'responsavel') return rResponsavel;
-              if (campo === 'origem') return rOrigem;
-              if (campo === 'funil') return rFunil;
-              if (campo === 'motivo_perda') return rMotivo;
-              if (campo === 'produto') return rProduto;
-              if (campo === 'estado') return rEstado;
-              if (campo === 'cliente') return rCliente;
-
-              // Fallback genérico para campos não mapeados explicitamente acima
-              return row[campo] || 'N/A';
-            }).join(' | ');
-
-            // --- 5. AGREGAÇÃO MATEMÁTICA ---
-            if (!agrupados[chave]) {
-              agrupados[chave] = {
-                qtd: 0,
-                ganhas: 0,
-                perdidas: 0,
-                valor_total: 0,
-                valor_ganho: 0,
-                valor_perdido: 0
-              };
-            }
-
-            agrupados[chave].qtd++;
-            agrupados[chave].valor_total += valor;
-
-            if (isGanha) {
-              agrupados[chave].ganhas++;
-              agrupados[chave].valor_ganho += valor;
-            } else if (isPerdida) {
-              agrupados[chave].perdidas++;
-              agrupados[chave].valor_perdido += valor;
-            }
-          });
-
-          // --- 6. FORMATAÇÃO FINAL PARA O GPT ---
-          const resultadoFinal = Object.entries(agrupados)
-            .map(([k, v]) => ({
-              grupo: k,
-              total_leads: v.qtd,
-              vendas: v.ganhas,
-              perdas: v.perdidas,
-              receita: Number(v.valor_ganho.toFixed(2)), // Number limpo para o JSON
-              receita_perdida: Number(v.valor_perdido.toFixed(2)),
-              conversao: v.qtd > 0 ? ((v.ganhas / v.qtd) * 100).toFixed(1) + '%' : '0%'
-            }))
-            // Ordenação Inteligente:
-            // 1. Por Receita (maior para menor)
-            // 2. Se receita for igual (ex: análise de perdas), ordena por Receita Perdida
-            // 3. Se ambos forem zero, ordena por Volume (Quantidade)
-            .sort((a, b) => {
-              return (b.receita - a.receita) ||
-                (b.receita_perdida - a.receita_perdida) ||
-                (b.total_leads - a.total_leads);
-            })
-            .slice(0, 50); // Top 50 para economizar tokens
-
-          // LOG DE DEBUG PARA O FRONTEND
-          debugLogs.push({
-            step: 'Resultado Calculado (Blindado)',
-            linhas_consideradas: rowCount,
-            amostra_output: resultadoFinal.slice(0, 3)
-          });
-
-          messages.push({
-            role: "tool",
-            tool_call_id: toolCall.id,
-            content: JSON.stringify(resultadoFinal)
-          });
+    for await (const chunk of stream) {
+      const delta: any = chunk.choices[0]?.delta;
+      if (!delta) continue;
+      if (delta.content) { content += delta.content; send({ type: 'delta', text: delta.content }); }
+      if (delta.tool_calls) {
+        for (const tcd of delta.tool_calls) {
+          const i = tcd.index;
+          if (!toolCalls[i]) toolCalls[i] = { id: '', type: 'function', function: { name: '', arguments: '' } };
+          if (tcd.id) toolCalls[i].id = tcd.id;
+          if (tcd.function?.name) toolCalls[i].function.name += tcd.function.name;
+          if (tcd.function?.arguments) toolCalls[i].function.arguments += tcd.function.arguments;
         }
       }
+    }
 
-      // Segunda chamada ao GPT (para ele formular a resposta final com os dados)
-      const finalResponse = await openai.chat.completions.create({
-        model: "gpt-4o",
-        messages: messages,
-      });
+    const calls = toolCalls.filter(Boolean);
+    if (calls.length === 0) return; // resposta final já transmitida via deltas
 
-      return res.json({
-        reply: finalResponse.choices[0].message.content,
-        debug: debugLogs // <--- AQUI ESTÁ O OURO: Enviamos os logs para o Frontend
+    messages.push({ role: 'assistant', content: content || null, tool_calls: calls });
+    for (const tc of calls) {
+      let args: any = {};
+      try { args = JSON.parse(tc.function.arguments || '{}'); } catch { /* args inválidos */ }
+      send({ type: 'status', step: tc.function.name === 'resumo_geral' ? 'Calculando KPIs...' : 'Analisando dados...' });
+      const out = executarTool(tc.function.name, args, rows);
+      debugLogs.push({ step: 'Ferramenta executada', tool: tc.function.name, argumentos: args, linhas_consideradas: out.rowCount });
+      messages.push({ role: 'tool', tool_call_id: tc.id, content: JSON.stringify(out.resultado) });
+    }
+  }
+
+  // Excedeu o limite de rodadas: força uma resposta final (sem ferramentas), ainda em streaming
+  const finalStream = await openai.chat.completions.create({ model: 'gpt-4o', messages, stream: true });
+  for await (const chunk of finalStream) {
+    const t = chunk.choices[0]?.delta?.content;
+    if (t) send({ type: 'delta', text: t });
+  }
+};
+
+const runGeminiChat = async (opts: {
+  systemPrompt: string; history: any[]; message: string; rows: any[];
+  send: (o: any) => void;
+}) => {
+  const { systemPrompt, history, message, rows, send } = opts;
+
+  // Gemini não usa function calling aqui: injetamos o perfil analítico real no contexto.
+  const contexto = {
+    resumo: resumoGeral(rows, {}).resultado,
+    por_vendedor: analisarDados(rows, { agrupar_por: ['responsavel'] }).resultado.slice(0, 15),
+    por_funil: analisarDados(rows, { agrupar_por: ['funil'] }).resultado,
+    por_origem: analisarDados(rows, { agrupar_por: ['origem'] }).resultado.slice(0, 10),
+    por_motivo_perda: analisarDados(rows, { filtros: { status: 'Perdida' }, agrupar_por: ['motivo_perda'] }).resultado.slice(0, 10),
+    timeline: analisarDados(rows, { agrupar_por: ['mes'] }).resultado,
+    por_produto: analisarDados(rows, { agrupar_por: ['produto'] }).resultado.slice(0, 10),
+    top_clientes: analisarDados(rows, { agrupar_por: ['cliente'] }).resultado.slice(0, 15)
+  };
+
+  const instrucao = `${systemPrompt}\n\n--- DADOS REAIS DA OPERAÇÃO (use estes números, não invente) ---\n${JSON.stringify(contexto)}`;
+  const model = genAI.getGenerativeModel({ model: 'gemini-1.5-pro', systemInstruction: instrucao });
+
+  // Gemini exige histórico alternando user/model e começando por user
+  const sanitized: any[] = [];
+  for (const h of history) {
+    const role = h.role === 'model' ? 'model' : 'user';
+    if (sanitized.length === 0 && role === 'model') continue;
+    if (sanitized.length > 0 && sanitized[sanitized.length - 1].role === role) continue;
+    sanitized.push({ role, parts: [{ text: h.content }] });
+  }
+
+  const chat = model.startChat({ history: sanitized });
+  const result = await chat.sendMessageStream(message);
+  for await (const chunk of result.stream) {
+    const t = chunk.text();
+    if (t) send({ type: 'delta', text: t });
+  }
+};
+
+// ==========================================
+// ROTA 3: CHAT (STREAMING SSE + FERRAMENTAS + PROVEDOR)
+// ==========================================
+app.post('/api/chat', async (req, res) => {
+  const { message, history, provider } = req.body;
+
+  if (!message || typeof message !== 'string') {
+    return res.status(400).json({ error: 'Mensagem inválida ou não fornecida.' });
+  }
+
+  // Autentica ANTES de abrir o stream, para poder responder erro com status HTTP normal
+  let user;
+  try {
+    user = await getUser(req);
+  } catch (e: any) {
+    return res.status(401).json({ error: e.message || 'Sessão inválida.' });
+  }
+
+  const safeHistory = Array.isArray(history) ? history.slice(-12) : [];
+  const selectedProvider = provider === 'gemini' ? 'gemini' : 'openai';
+
+  // Cabeçalhos SSE (resposta em streaming)
+  res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
+  if ((res as any).flushHeaders) (res as any).flushHeaders();
+  const send = (obj: any) => res.write(`data: ${JSON.stringify(obj)}\n\n`);
+
+  const debugLogs: any[] = [];
+
+  try {
+    const rows = await fetchAllUserOpportunities(user.id);
+
+    if (!rows || rows.length === 0) {
+      send({ type: 'delta', text: 'Ainda não há dados importados para analisar. Faça uma sincronização ou um upload primeiro.' });
+      send({ type: 'done', debug: [] });
+      return res.end();
+    }
+
+    const systemPrompt = buildChatSystemPrompt();
+
+    if (selectedProvider === 'gemini') {
+      await runGeminiChat({ systemPrompt, history: safeHistory, message, rows, send });
+    } else {
+      await runOpenAiChat({ systemPrompt, history: safeHistory, message, rows, send, debugLogs });
+    }
+
+    send({ type: 'done', debug: debugLogs });
+    res.end();
+  } catch (error: any) {
+    console.error('Erro chat:', error);
+    send({ type: 'error', message: error.message || 'Erro ao processar a solicitação.' });
+    res.end();
+  }
+});
+
+// ==========================================
+// MÓDULO INTEGRADO: API SIMPLO CRM
+// ==========================================
+
+// Helper para mascarar o Token
+const maskToken = (token: string) => {
+  if (!token || token.length < 8) return '****';
+  return `${token.substring(0, 4)}****${token.substring(token.length - 4)}`;
+};
+
+// Configuração fixa da integração com o Simplo CRM.
+// A URL é sempre a mesma e os campos da API são fixos, então não há mapeamento manual.
+const SIMPLO_BASE_URL = 'https://app.simplocrm.com.br';
+const SIMPLO_CRM_MAPPING: Mapping = {
+  protocolo: 'id_oportunidade',
+  responsavel: 'responsavel',
+  funil: 'funil',
+  etapa: 'etapa',
+  status: 'id_status',
+  valor: 'valor',
+  data_criacao: 'data_cadastro',
+  data_conclusao: 'data_conquista_perda',
+  origem: 'origem',
+  cliente: 'cliente',
+  estado: 'uf',
+  cidade: 'cidade',
+  produto: 'produtos_oportunidade',
+  motivo: 'id_motivo_perda'
+};
+
+// A API do Simplo CRM lê os filtros pela QUERY STRING (GET), não pelo corpo (POST).
+// O filtro de situação é o parâmetro `status`:
+//   'A' = em aberto (usar tipo_data=data_cadastro)
+//   'C' = conquistadas/ganhas e 'P' = perdidas (usar tipo_data=data_conquista_perda)
+const buildCrmListUrl = (page: number, status: string, tipoData: string) => {
+  const params = new URLSearchParams({
+    pageAtual: String(page),
+    order_column: 'tb_oportunidade.data_cadastro',
+    order: 'DESC',
+    tipo_data: tipoData,
+    status,
+    add_tag: '1'
+  });
+  return `${SIMPLO_BASE_URL}/oportunidade/listar?${params.toString()}`;
+};
+
+// Busca todas as páginas de um grupo de situação ('A' | 'C' | 'P').
+const fetchCrmBucket = async (apiToken: string, status: string, tipoData: string) => {
+  let all: any[] = [];
+  let page = 1;
+  let totalPages = 1;
+  const maxPages = 2000; // Proteção contra loop infinito (API fixa ~20 registros/página).
+
+  while (page <= totalPages && page <= maxPages) {
+    const response = await fetch(buildCrmListUrl(page, status, tipoData), {
+      method: 'GET',
+      headers: { 'Authorization': apiToken, 'Accept': 'application/json' }
+    });
+
+    if (!response.ok) {
+      const errText = await response.text();
+      console.error(`[CRM] Falha (status=${status}, página ${page}): ${response.status}`, errText);
+      throw new Error(`Falha na API do Simplo CRM (situação ${status}, página ${page}): Status ${response.status}`);
+    }
+
+    const data: any = await response.json();
+    if (Array.isArray(data.dados)) all = all.concat(data.dados);
+    if (data.qtdPage && !isNaN(Number(data.qtdPage))) totalPages = Number(data.qtdPage);
+    page++;
+  }
+
+  return all;
+};
+
+// Busca os motivos de perda da conta e devolve um mapa id_motivo_perda -> descrição (nome).
+// Endpoint usa HÍFEN: /motivo-perda/listar. A API não traz o nome do motivo na oportunidade.
+const fetchMotivoPerdaMap = async (apiToken: string): Promise<Map<string, string>> => {
+  const map = new Map<string, string>();
+  let page = 1;
+  let totalPages = 1;
+
+  while (page <= totalPages && page <= 50) {
+    const url = `${SIMPLO_BASE_URL}/motivo-perda/listar?pageAtual=${page}&order_column=descricao&order=DESC`;
+    const response = await fetch(url, {
+      method: 'GET',
+      headers: { 'Authorization': apiToken, 'Accept': 'application/json' }
+    });
+
+    if (!response.ok) break;
+
+    const data: any = await response.json();
+    if (Array.isArray(data.dados)) {
+      for (const m of data.dados) {
+        const id = String(m.id_motivo_perda ?? '').trim();
+        const nome = String(m.descricao ?? '').trim();
+        if (id && nome) map.set(id, nome);
+      }
+    }
+    if (data.qtdPage && !isNaN(Number(data.qtdPage))) totalPages = Number(data.qtdPage);
+    page++;
+  }
+
+  return map;
+};
+
+// 1. Rota de teste de conexão (valida apenas se o token é válido)
+app.post('/api/crm/test-connect', async (req, res) => {
+  try {
+    await getUser(req);
+    const { apiToken } = req.body;
+
+    if (!apiToken) {
+      return res.status(400).json({ error: 'Token de API é obrigatório.' });
+    }
+
+    console.log(`[CRM] Testando conexão com: ${SIMPLO_BASE_URL}`);
+
+    // Chamada de teste para validar o token (lista a 1ª página de abertas)
+    const response = await fetch(buildCrmListUrl(1, 'A', 'data_cadastro'), {
+      method: 'GET',
+      headers: { 'Authorization': apiToken, 'Accept': 'application/json' }
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error(`[CRM] Falha na API: Status ${response.status}`, errorText);
+      return res.status(response.status).json({
+        error: `Falha na conexão com o CRM (Status ${response.status}). Verifique se o token está correto.`
       });
     }
 
-    // Se não chamou ferramenta, retorna direto
-    res.json({ reply: responseMessage.content, debug: null });
+    res.json({ success: true, message: 'Conexão estabelecida com sucesso!' });
 
   } catch (error: any) {
-    console.error("Erro chat:", error);
+    console.error('[CRM] Erro ao testar conexão:', error);
+    res.status(500).json({ error: `Erro ao conectar com a API: ${error.message}` });
+  }
+});
+
+// 2. Rota para obter as configurações salvas da API do usuário
+app.get('/api/crm/config', async (req, res) => {
+  try {
+    const user = await getUser(req);
+    
+    const { data, error } = await supabase
+      .from('crm_configs')
+      .select('*')
+      .eq('user_id', user.id)
+      .single();
+
+    if (error || !data) {
+      return res.json({ configured: false });
+    }
+
+    res.json({
+      configured: true,
+      baseUrl: data.base_url,
+      apiToken: maskToken(data.api_token),
+      mapping: data.mapping_profile,
+      lastSync: data.last_sync,
+      syncStatus: data.sync_status
+    });
+
+  } catch (error: any) {
     res.status(500).json({ error: error.message });
   }
 });
 
-app.listen(PORT, () => { console.log(`🚀 Servidor na porta ${PORT}`); });
+// 3. Rota para salvar as credenciais (URL e mapeamento são fixos)
+app.post('/api/crm/config', async (req, res) => {
+  try {
+    const user = await getUser(req);
+    const { apiToken } = req.body;
+
+    if (!apiToken) {
+      return res.status(400).json({ error: 'Token de API é obrigatório.' });
+    }
+
+    // Se o token for o mascarado enviado do frontend, busca o existente no DB para manter
+    let finalToken = apiToken;
+    if (apiToken.includes('****')) {
+      const { data: existing } = await supabase
+        .from('crm_configs')
+        .select('api_token')
+        .eq('user_id', user.id)
+        .single();
+
+      if (existing) {
+        finalToken = existing.api_token;
+      } else {
+        return res.status(400).json({ error: 'Token inválido.' });
+      }
+    }
+
+    const { error } = await supabase
+      .from('crm_configs')
+      .upsert({
+        user_id: user.id,
+        base_url: SIMPLO_BASE_URL,
+        api_token: finalToken,
+        mapping_profile: SIMPLO_CRM_MAPPING,
+        updated_at: new Date().toISOString()
+      });
+
+    if (error) {
+      console.error('[CRM] Erro ao salvar config no Supabase:', error);
+      return res.status(500).json({ error: `Erro no banco de dados: ${error.message}` });
+    }
+
+    res.json({ success: true, message: 'Configuração de integração salva com sucesso!' });
+
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// 4. Rota de sincronização manual sob demanda
+app.post('/api/crm/sync', async (req, res) => {
+  try {
+    const user = await getUser(req);
+    
+    // Busca credenciais do DB
+    const { data: config, error: configError } = await supabase
+      .from('crm_configs')
+      .select('*')
+      .eq('user_id', user.id)
+      .single();
+
+    if (configError || !config) {
+      return res.status(400).json({ error: 'Integração CRM não configurada. Configure a integração primeiro.' });
+    }
+
+    const { api_token } = config;
+    const syncBatchId = crypto.randomUUID();
+    const batchName = `Sincronização API: ${new Date().toLocaleDateString('pt-BR')} ${new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}`;
+
+    console.log(`[CRM Sync] Iniciando importação manual para user: ${user.id}`);
+
+    // A API segrega por situação via query string (status=A/C/P). Buscamos os 3 grupos
+    // separadamente e marcamos a situação pelo grupo de origem (sinal confiável).
+    const [abertas, ganhas, perdidas, motivoMap] = await Promise.all([
+      fetchCrmBucket(api_token, 'A', 'data_cadastro'),
+      fetchCrmBucket(api_token, 'C', 'data_conquista_perda'),
+      fetchCrmBucket(api_token, 'P', 'data_conquista_perda'),
+      fetchMotivoPerdaMap(api_token)
+    ]);
+
+    const grupos: { rows: any[]; status: string }[] = [
+      { rows: abertas, status: 'Em aberto' },
+      { rows: ganhas, status: 'Ganha' },
+      { rows: perdidas, status: 'Perdida' }
+    ];
+
+    const allCrmOpportunities = [...abertas, ...ganhas, ...perdidas];
+    console.log(`[CRM Sync] Extraídas ${abertas.length} abertas, ${ganhas.length} ganhas, ${perdidas.length} perdidas (total ${allCrmOpportunities.length}).`);
+
+    if (allCrmOpportunities.length === 0) {
+      // Atualiza status no banco
+      await supabase.from('crm_configs').update({
+        last_sync: new Date().toISOString(),
+        sync_status: 'sucesso',
+        error_message: null
+      }).eq('user_id', user.id);
+
+      return res.json({
+        message: 'Nenhum registro encontrado no CRM.',
+        importedRows: 0,
+        totalDb: (await fetchAllUserOpportunities(user.id)).length
+      });
+    }
+
+    // --- TRAVA DE SEGURANÇA: 1 empresa por conta de BI ---
+    // O token do Simplo CRM já escopa os dados a uma única empresa (id_empresa).
+    // Vinculamos a conta de BI a essa empresa e impedimos misturar dados de outra.
+    const empresasNoLote = Array.from(
+      new Set(allCrmOpportunities.map((o: any) => String(o.id_empresa ?? '').trim()).filter(Boolean))
+    );
+
+    if (empresasNoLote.length > 1) {
+      throw new Error(`A API retornou dados de mais de uma empresa (${empresasNoLote.join(', ')}). Sincronização abortada por segurança.`);
+    }
+
+    const empresaAtual = empresasNoLote[0] || null;
+    const empresaVinculada = (config as any).id_empresa || null;
+
+    if (empresaVinculada && empresaAtual && empresaVinculada !== empresaAtual) {
+      throw new Error(`Esta conta de BI já está vinculada à empresa ${empresaVinculada}, mas o token informado pertence à empresa ${empresaAtual}. Para trocar de empresa, remova primeiro os dados atuais na aba Histórico.`);
+    }
+
+    // Normalização. A situação (Ganha/Perdida/Em aberto) vem do grupo da API, não do parsing.
+    // Usamos sempre o mapeamento fixo atual (ignora mapeamentos antigos salvos no banco).
+    const activeMapping = SIMPLO_CRM_MAPPING;
+    const rawRows = grupos.flatMap(({ rows, status }) =>
+      rows.map((rawRow: any) => {
+        const cleanRow = normalizeRow(rawRow, activeMapping);
+        cleanRow.status = status;
+
+        // Traduz o id_motivo_perda para o nome do motivo (a oportunidade só traz o ID)
+        if (cleanRow.motivo_perda && motivoMap.has(cleanRow.motivo_perda)) {
+          cleanRow.motivo_perda = motivoMap.get(cleanRow.motivo_perda)!;
+        }
+
+        // Assinatura MD5 determinística para deduplicação
+        const signature = `${user.id}-${cleanRow.protocolo}-${cleanRow.nome_cliente}-${cleanRow.data_criacao}-${cleanRow.valor}`;
+        const uniqueHash = crypto.createHash('md5').update(signature).digest('hex');
+
+        return {
+          user_id: user.id,
+          unique_hash: uniqueHash,
+          batch_id: syncBatchId,
+          id_empresa: empresaAtual,
+          ...cleanRow
+        };
+      })
+    );
+
+    // Filtra linhas válidas
+    const validRows = rawRows.filter((r: any) => r.valor >= 0 && r.data_criacao);
+
+    // Deduplicação em nível de array de memória
+    const uniqueRowsMap = new Map();
+    validRows.forEach((row: any) => { uniqueRowsMap.set(row.unique_hash, row); });
+    const rowsToUpsert = Array.from(uniqueRowsMap.values());
+
+    console.log(`[CRM Sync] Linhas válidas e deduplicadas prontas para gravação: ${rowsToUpsert.length}`);
+
+    // Gravação em lote (upsert) no Supabase (1000 a 1000)
+    const batchSize = 1000;
+    for (let i = 0; i < rowsToUpsert.length; i += batchSize) {
+      const batch = rowsToUpsert.slice(i, i + batchSize);
+      const { error } = await supabase
+        .from('oportunidades')
+        .upsert(batch, { onConflict: 'unique_hash', ignoreDuplicates: false });
+
+      if (error) {
+        console.error('[CRM Sync] Erro no Upsert do banco:', error);
+        throw new Error(`Erro ao persistir no Supabase: ${error.message}`);
+      }
+    }
+
+    // Registra no histórico de importações para permitir reversão
+    await supabase.from('import_history').insert({
+      id: syncBatchId,
+      user_id: user.id,
+      file_name: batchName,
+      rows_count: rowsToUpsert.length,
+      created_at: new Date().toISOString()
+    });
+
+    // Atualiza status de sincronização e vincula a empresa à conta de BI
+    await supabase.from('crm_configs').update({
+      last_sync: new Date().toISOString(),
+      sync_status: 'sucesso',
+      error_message: null,
+      id_empresa: empresaAtual
+    }).eq('user_id', user.id);
+
+    const finalDbData = await fetchAllUserOpportunities(user.id);
+
+    res.json({
+      message: 'Sincronização realizada com sucesso',
+      importedRows: rowsToUpsert.length,
+      totalDb: finalDbData.length,
+      importedData: finalDbData
+    });
+
+  } catch (error: any) {
+    console.error('[CRM Sync] Erro Crítico de Sincronização:', error);
+    
+    // Registra falha na tabela crm_configs
+    try {
+      const user = await getUser(req);
+      await supabase.from('crm_configs').update({
+        sync_status: 'erro',
+        error_message: error.message
+      }).eq('user_id', user.id);
+    } catch (_) {}
+
+    res.status(500).json({ error: `Erro na sincronização: ${error.message}` });
+  }
+});
+
+// Função para certificar a existência da tabela crm_configs no Supabase
+const initDatabase = async () => {
+  try {
+    const { error } = await supabase.from('crm_configs').select('count', { count: 'exact', head: true }).limit(1);
+    
+    if (error && error.code === '42P01') {
+      console.log('⚠️ Tabela [crm_configs] não existe no Supabase. Criando via exec_sql...');
+      
+      const { error: rpcError } = await supabase.rpc('exec_sql', {
+        query: `
+          CREATE TABLE IF NOT EXISTS public.crm_configs (
+            user_id UUID PRIMARY KEY,
+            base_url TEXT NOT NULL,
+            api_token TEXT NOT NULL,
+            mapping_profile JSONB NOT NULL,
+            last_sync TIMESTAMP WITH TIME ZONE,
+            sync_status TEXT,
+            error_message TEXT,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+          );
+        `
+      });
+
+      if (rpcError) {
+        console.warn('⚠️ exec_sql indisponível. Por favor, certifique-se de executar o SQL de crm_configs no painel do Supabase:\n');
+        console.log(`
+          CREATE TABLE public.crm_configs (
+            user_id UUID PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
+            base_url TEXT NOT NULL,
+            api_token TEXT NOT NULL,
+            mapping_profile JSONB NOT NULL,
+            last_sync TIMESTAMP WITH TIME ZONE,
+            sync_status TEXT,
+            error_message TEXT,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+          );
+        `);
+      } else {
+        console.log('✅ Tabela [crm_configs] criada com sucesso via RPC!');
+      }
+    } else if (error) {
+      console.error('[Database] Erro de verificação:', error.message);
+    } else {
+      console.log('✅ Conexão e presença da tabela [crm_configs] confirmadas.');
+    }
+  } catch (err: any) {
+    console.error('[Database] Erro na inicialização:', err.message);
+  }
+};
+
+app.listen(PORT, async () => { 
+  console.log(`🚀 Servidor na porta ${PORT}`);
+  await initDatabase();
+});
