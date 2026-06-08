@@ -226,6 +226,14 @@ const parseBrazilianCurrency = (val: string | null | undefined): number => {
   return isNaN(number) ? 0 : number;
 };
 
+// A API do Simplo CRM retorna o valor em CENTAVOS (inteiro sem decimais).
+// Ex: 163303742 → R$ 1.633.037,42  (dividir por 100)
+const parseCrmCurrency = (val: string | number | null | undefined): number => {
+  if (val === null || val === undefined || val === '') return 0;
+  const cents = parseFloat(String(val).replace(/[^\d.-]/g, ''));
+  return isNaN(cents) ? 0 : cents / 100;
+};
+
 // Adicione esta função para converter DD/MM/YYYY para Objeto Date seguro
 const parseBrazilianDate = (dateStr: string | null | undefined): Date | null => {
   if (!dateStr || dateStr.trim() === '') return null;
@@ -1334,6 +1342,12 @@ app.post('/api/crm/sync', async (req, res) => {
         const cleanRow = normalizeRow(rawRow, activeMapping);
         cleanRow.status = status;
 
+        // CORREÇÃO DECIMAL: A API do Simplo CRM retorna o valor em centavos (inteiro).
+        // normalizeRow usa parseBrazilianCurrency que não divide por 100.
+        // Ex: 163303742 → parseBrazilianCurrency → 163303742 (ERRADO)
+        //     163303742 → parseCrmCurrency        → 1633037.42 (CORRETO)
+        cleanRow.valor = parseCrmCurrency(rawRow[activeMapping.valor]);
+
         // Traduz o id_motivo_perda para o nome do motivo (a oportunidade só traz o ID)
         if (cleanRow.motivo_perda && motivoMap.has(cleanRow.motivo_perda)) {
           cleanRow.motivo_perda = motivoMap.get(cleanRow.motivo_perda)!;
@@ -1376,6 +1390,58 @@ app.post('/api/crm/sync', async (req, res) => {
         throw new Error(`Erro ao persistir no Supabase: ${error.message}`);
       }
     }
+
+    // ─── PURGE: remove do banco registros que foram apagados no CRM ──────────
+    // Estratégia: compara os protocolos (id_oportunidade) retornados pela API
+    // com os que estão no banco (apenas registros do CRM, identificados por
+    // id_empresa preenchido). Qualquer protocolo ausente no lote atual foi
+    // deletado no CRM e deve sair do nosso banco também.
+    if (empresaAtual) {
+      // Conjunto de IDs vindos do CRM nesta sincronização
+      const crmProtocolos = new Set(
+        rowsToUpsert
+          .map((r: any) => String(r.protocolo ?? '').trim())
+          .filter(Boolean)
+      );
+
+      // Busca todos os protocolos de CRM já persistidos para este usuário/empresa
+      const { data: dbRows, error: dbRowsError } = await supabase
+        .from('oportunidades')
+        .select('id, protocolo')
+        .eq('user_id', user.id)
+        .eq('id_empresa', empresaAtual);
+
+      if (dbRowsError) {
+        // Não aborta o sync por falha no purge — apenas loga
+        console.error('[CRM Sync] Aviso: não foi possível consultar registros para purge:', dbRowsError.message);
+      } else if (dbRows && dbRows.length > 0) {
+        const idsParaDeletar = dbRows
+          .filter((row: any) => !crmProtocolos.has(String(row.protocolo ?? '').trim()))
+          .map((row: any) => row.id);
+
+        if (idsParaDeletar.length > 0) {
+          console.log(`[CRM Sync] Purge: ${idsParaDeletar.length} oportunidade(s) removida(s) do CRM serão apagadas do banco.`);
+
+          // Deleta em lotes para não extrapolar limites do Supabase
+          const deleteBatchSize = 500;
+          for (let i = 0; i < idsParaDeletar.length; i += deleteBatchSize) {
+            const batch = idsParaDeletar.slice(i, i + deleteBatchSize);
+            const { error: delError } = await supabase
+              .from('oportunidades')
+              .delete()
+              .in('id', batch)
+              .eq('user_id', user.id); // Segurança extra
+
+            if (delError) {
+              console.error('[CRM Sync] Aviso: erro ao purgar registros deletados:', delError.message);
+            }
+          }
+        } else {
+          console.log('[CRM Sync] Purge: nenhum registro deletado no CRM desde a última sync.');
+        }
+      }
+    }
+    // ─────────────────────────────────────────────────────────────────────────
 
     // Registra no histórico de importações para permitir reversão
     await supabase.from('import_history').insert({

@@ -1,0 +1,23 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:materiais.simplocrm.com.br)",
+      "Bash(rm -f \"frontend/src/services/aiService.ts\" \"frontend/src/index.tsx\" \"backend/src/services/aiProviderService.ts\" \"backend/src/services/analyticsService.ts\" \"backend/src/lib/supabaseClient.ts\")",
+      "Bash(ls backend/src/services backend/src/lib)",
+      "Bash(npx tsc *)",
+      "Bash(echo \"BACKEND_EXIT=$?\")",
+      "Bash(echo \"FRONTEND_EXIT=$?\")",
+      "Bash(curl -s -m 30 -o /tmp/crm_out.txt -w 'HTTP_STATUS=%{http_code}\\\\n' -X POST __TRACKED_VAR__/oportunidade/listar -H 'Authorization: 413C65E0-3A2E-0975-4652-0FBC5FB64F70' -H 'Content-Type: application/json' -d '{\"pageAtual\":1,\"rp\":2,\"order\":\"DESC\",\"order_column\":\"tb_oportunidade.data_cadastro\",\"tipo_data\":\"data_cadastro\",\"periodo1\":\"01/01/2000\",\"periodo2\":\"31/12/2099\"}')",
+      "Read(//tmp/**)",
+      "Bash(curl -s -m 20 -o /tmp/supa_out.txt -w 'HTTP_STATUS=%{http_code}\\\\n' 'https://jmowvduvdjjnyjrmeooj.supabase.co/rest/v1/__TRACKED_VAR__?select=*&limit=3' -H 'apikey: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imptb3d2ZHV2ZGpqbnlqcm1lb29qIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjM0MjAzNzIsImV4cCI6MjA3ODk5NjM3Mn0.3yoTwJvyPbsMs4X_l9q7Ya1dYTu6_LsafN38wxqe0-M' -H 'Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imptb3d2ZHV2ZGpqbnlqcm1lb29qIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjM0MjAzNzIsImV4cCI6MjA3ODk5NjM3Mn0.3yoTwJvyPbsMs4X_l9q7Ya1dYTu6_LsafN38wxqe0-M')",
+      "Bash(curl -s -m 30 -w '\\\\n__HTTP_STATUS=%{http_code}__\\\\n' -X POST __TRACKED_VAR__/oportunidade/listar -H 'Authorization: 413C65E0-3A2E-0975-4652-0FBC5FB64F70' -H 'Content-Type: application/json' -d '{\"pageAtual\":1,\"rp\":2,\"order\":\"DESC\",\"order_column\":\"tb_oportunidade.data_cadastro\",\"tipo_data\":\"data_cadastro\",\"periodo1\":\"01/01/2000\",\"periodo2\":\"31/12/2099\"}')",
+      "Bash(curl -s -m 20 -w '\\\\n__HTTP_STATUS=%{http_code}__\\\\n' 'https://jmowvduvdjjnyjrmeooj.supabase.co/rest/v1/__TRACKED_VAR__?select=*&limit=3' -H 'apikey: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imptb3d2ZHV2ZGpqbnlqcm1lb29qIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjM0MjAzNzIsImV4cCI6MjA3ODk5NjM3Mn0.3yoTwJvyPbsMs4X_l9q7Ya1dYTu6_LsafN38wxqe0-M' -H 'Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imptb3d2ZHV2ZGpqbnlqcm1lb29qIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjM0MjAzNzIsImV4cCI6MjA3ODk5NjM3Mn0.3yoTwJvyPbsMs4X_l9q7Ya1dYTu6_LsafN38wxqe0-M')",
+      "PowerShell(try { $r = Invoke-WebRequest -Uri \"https://jmowvduvdjjnyjrmeooj.supabase.co/rest/v1/\" -Method GET -TimeoutSec 15 -UseBasicParsing; Write-Output \"CONN_OK status=$\\($r.StatusCode\\)\" } catch { Write-Output \"CONN_FAIL: $\\($_.Exception.Message\\)\" })",
+      "Bash(node -e \"console.log\\('react-markdown:', require\\('./package.json'\\).dependencies['react-markdown'] || 'MISSING'\\); console.log\\('remark-gfm:', require\\('./package.json'\\).dependencies['remark-gfm'] || 'MISSING'\\);\")",
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)",
+      "Bash(git push *)",
+      "Bash(echo \"EXIT=$?\")"
+    ]
+  }
+}
