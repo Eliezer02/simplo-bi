@@ -1414,7 +1414,8 @@ app.post('/api/crm/sync', async (req, res) => {
           cleanRow.motivo_perda = motivoMap.get(cleanRow.motivo_perda)!;
         }
 
-        const signature = `${user.id}-${cleanRow.protocolo}-${cleanRow.nome_cliente}-${cleanRow.data_criacao}-${cleanRow.valor}`;
+        // Assinatura MD5 determinística baseada no protocolo para evitar duplicatas ao atualizar valores
+        const signature = `${user.id}-${cleanRow.protocolo}`;
         const uniqueHash = crypto.createHash('md5').update(signature).digest('hex');
 
         return {
