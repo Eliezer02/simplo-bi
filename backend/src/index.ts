@@ -1404,53 +1404,76 @@ app.post('/api/crm/sync', async (req, res) => {
 
     // ─── PURGE: remove do banco registros que foram apagados no CRM ──────────
     // Estratégia: compara os protocolos (id_oportunidade) retornados pela API
-    // com os que estão no banco (apenas registros do CRM, identificados por
-    // id_empresa preenchido). Qualquer protocolo ausente no lote atual foi
-    // deletado no CRM e deve sair do nosso banco também.
-    if (empresaAtual) {
-      // Conjunto de IDs vindos do CRM nesta sincronização
+    // com todos os que estão no banco para este usuário. Protocolos ausentes
+    // no lote atual foram deletados no CRM e devem sair do banco também.
+    // IMPORTANTE: usa unique_hash (PK real) para o delete, nunca "id".
+    try {
+      // Conjunto de protocolos vindos do CRM nesta sincronização
       const crmProtocolos = new Set(
         rowsToUpsert
           .map((r: any) => String(r.protocolo ?? '').trim())
           .filter(Boolean)
       );
 
-      // Busca todos os protocolos de CRM já persistidos para este usuário/empresa
-      const { data: dbRows, error: dbRowsError } = await supabase
-        .from('oportunidades')
-        .select('id, protocolo')
-        .eq('user_id', user.id)
-        .eq('id_empresa', empresaAtual);
+      if (crmProtocolos.size > 0) {
+        // Busca todos os unique_hash + protocolo persistidos para este usuário
+        // Usa paginação para não perder registros além do limite de 1000 do Supabase
+        let allDbRows: any[] = [];
+        let fromIdx = 0;
+        const pageSize = 1000;
+        let keepFetching = true;
 
-      if (dbRowsError) {
-        // Não aborta o sync por falha no purge — apenas loga
-        console.error('[CRM Sync] Aviso: não foi possível consultar registros para purge:', dbRowsError.message);
-      } else if (dbRows && dbRows.length > 0) {
-        const idsParaDeletar = dbRows
-          .filter((row: any) => !crmProtocolos.has(String(row.protocolo ?? '').trim()))
-          .map((row: any) => row.id);
+        while (keepFetching) {
+          const { data: page, error: pageError } = await supabase
+            .from('oportunidades')
+            .select('unique_hash, protocolo')
+            .eq('user_id', user.id)
+            .range(fromIdx, fromIdx + pageSize - 1);
 
-        if (idsParaDeletar.length > 0) {
-          console.log(`[CRM Sync] Purge: ${idsParaDeletar.length} oportunidade(s) removida(s) do CRM serão apagadas do banco.`);
+          if (pageError) {
+            console.error('[CRM Sync] Aviso: erro ao consultar registros para purge:', pageError.message);
+            keepFetching = false;
+          } else if (page && page.length > 0) {
+            allDbRows = allDbRows.concat(page);
+            fromIdx += pageSize;
+            if (page.length < pageSize) keepFetching = false;
+          } else {
+            keepFetching = false;
+          }
+        }
 
-          // Deleta em lotes para não extrapolar limites do Supabase
+        // Identifica hashes de registros cujo protocolo não veio mais do CRM
+        const hashesParaDeletar = allDbRows
+          .filter((row: any) => {
+            const proto = String(row.protocolo ?? '').trim();
+            // Só purga se tem protocolo preenchido (registros de CSV têm protocolo vazio/N/A)
+            return proto && proto !== 'N/A' && !crmProtocolos.has(proto);
+          })
+          .map((row: any) => row.unique_hash);
+
+        if (hashesParaDeletar.length > 0) {
+          console.log(`[CRM Sync] Purge: ${hashesParaDeletar.length} oportunidade(s) deletada(s) no CRM serão removidas do banco.`);
+
           const deleteBatchSize = 500;
-          for (let i = 0; i < idsParaDeletar.length; i += deleteBatchSize) {
-            const batch = idsParaDeletar.slice(i, i + deleteBatchSize);
+          for (let i = 0; i < hashesParaDeletar.length; i += deleteBatchSize) {
+            const batch = hashesParaDeletar.slice(i, i + deleteBatchSize);
             const { error: delError } = await supabase
               .from('oportunidades')
               .delete()
-              .in('id', batch)
+              .in('unique_hash', batch)
               .eq('user_id', user.id); // Segurança extra
 
             if (delError) {
-              console.error('[CRM Sync] Aviso: erro ao purgar registros deletados:', delError.message);
+              console.error('[CRM Sync] Aviso: erro ao purgar registros:', delError.message);
             }
           }
         } else {
           console.log('[CRM Sync] Purge: nenhum registro deletado no CRM desde a última sync.');
         }
       }
+    } catch (purgeError: any) {
+      // Purge nunca deve abortar o sync — apenas loga o problema
+      console.error('[CRM Sync] Aviso: falha no purge (sync continua):', purgeError.message);
     }
     // ─────────────────────────────────────────────────────────────────────────
 
