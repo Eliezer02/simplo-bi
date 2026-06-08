@@ -1077,6 +1077,14 @@ const SIMPLO_CRM_MAPPING: Mapping = {
   motivo: 'id_motivo_perda'
 };
 
+// Helper: fetch com timeout para evitar que chamadas à API do CRM fiquem presas indefinidamente.
+const fetchWithTimeout = (url: string, options: RequestInit, timeoutMs = 30000): Promise<Response> => {
+  const controller = new AbortController();
+  const id = setTimeout(() => controller.abort(), timeoutMs);
+  return fetch(url, { ...options, signal: controller.signal })
+    .finally(() => clearTimeout(id));
+};
+
 // A API do Simplo CRM lê os filtros pela QUERY STRING (GET), não pelo corpo (POST).
 // O filtro de situação é o parâmetro `status`:
 //   'A' = em aberto (usar tipo_data=data_cadastro)
@@ -1101,7 +1109,7 @@ const fetchCrmBucket = async (apiToken: string, status: string, tipoData: string
   const maxPages = 2000; // Proteção contra loop infinito (API fixa ~20 registros/página).
 
   while (page <= totalPages && page <= maxPages) {
-    const response = await fetch(buildCrmListUrl(page, status, tipoData), {
+    const response = await fetchWithTimeout(buildCrmListUrl(page, status, tipoData), {
       method: 'GET',
       headers: { 'Authorization': apiToken, 'Accept': 'application/json' }
     });
@@ -1115,6 +1123,7 @@ const fetchCrmBucket = async (apiToken: string, status: string, tipoData: string
     const data: any = await response.json();
     if (Array.isArray(data.dados)) all = all.concat(data.dados);
     if (data.qtdPage && !isNaN(Number(data.qtdPage))) totalPages = Number(data.qtdPage);
+    console.log(`[CRM] Bucket status=${status} página ${page}/${totalPages} — ${all.length} registros acumulados`);
     page++;
   }
 
@@ -1130,7 +1139,7 @@ const fetchMotivoPerdaMap = async (apiToken: string): Promise<Map<string, string
 
   while (page <= totalPages && page <= 50) {
     const url = `${SIMPLO_BASE_URL}/motivo-perda/listar?pageAtual=${page}&order_column=descricao&order=DESC`;
-    const response = await fetch(url, {
+    const response = await fetchWithTimeout(url, {
       method: 'GET',
       headers: { 'Authorization': apiToken, 'Accept': 'application/json' }
     });
@@ -1165,10 +1174,10 @@ app.post('/api/crm/test-connect', async (req, res) => {
     console.log(`[CRM] Testando conexão com: ${SIMPLO_BASE_URL}`);
 
     // Chamada de teste para validar o token (lista a 1ª página de abertas)
-    const response = await fetch(buildCrmListUrl(1, 'A', 'data_cadastro'), {
+    const response = await fetchWithTimeout(buildCrmListUrl(1, 'A', 'data_cadastro'), {
       method: 'GET',
       headers: { 'Authorization': apiToken, 'Accept': 'application/json' }
-    });
+    }, 15000);
 
     if (!response.ok) {
       const errorText = await response.text();
