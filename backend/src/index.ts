@@ -226,12 +226,14 @@ const parseBrazilianCurrency = (val: string | null | undefined): number => {
   return isNaN(number) ? 0 : number;
 };
 
-// A API do Simplo CRM retorna o valor em CENTAVOS (inteiro sem decimais).
-// Ex: 163303742 → R$ 1.633.037,42  (dividir por 100)
+// A API do Simplo CRM retorna o valor como float padrão com ponto decimal.
+// Ex: 1633037.42 → R$ 1.633.037,42  (parseFloat direto, sem dividir por 100)
+// ATENÇÃO: NÃO usar parseBrazilianCurrency aqui, pois ela remove o ponto
+// tratando-o como separador de milhar: 1633037.42 → 163303742 (errado!).
 const parseCrmCurrency = (val: string | number | null | undefined): number => {
   if (val === null || val === undefined || val === '') return 0;
-  const cents = parseFloat(String(val).replace(/[^\d.-]/g, ''));
-  return isNaN(cents) ? 0 : cents / 100;
+  const number = parseFloat(String(val).replace(/[^\d.-]/g, ''));
+  return isNaN(number) ? 0 : number;
 };
 
 // Adicione esta função para converter DD/MM/YYYY para Objeto Date seguro
