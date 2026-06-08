@@ -31,11 +31,20 @@ const upload = multer({ storage: storage });
 // --- MIDDLEWARES E HELPERS ---
 
 const getUser = async (req: express.Request) => {
+  console.log('[Auth] Obtendo token de Authorization...');
   const authHeader = req.headers.authorization;
-  if (!authHeader) throw new Error('Acesso negado: Token não fornecido.');
+  if (!authHeader) {
+    console.error('[Auth] Erro: Token não fornecido.');
+    throw new Error('Acesso negado: Token não fornecido.');
+  }
   const token = authHeader.split(' ')[1];
+  console.log('[Auth] Validando token com Supabase...');
   const { data: { user }, error } = await supabase.auth.getUser(token);
-  if (error || !user) throw new Error('Sessão inválida ou expirada.');
+  if (error || !user) {
+    console.error('[Auth] Erro: Sessão inválida ou expirada:', error?.message);
+    throw new Error('Sessão inválida ou expirada.');
+  }
+  console.log(`[Auth] Usuário autenticado com sucesso: ${user.id}`);
   return user;
 };
 
@@ -1164,33 +1173,63 @@ const fetchMotivoPerdaMap = async (apiToken: string): Promise<Map<string, string
 // 1. Rota de teste de conexão (valida apenas se o token é válido)
 app.post('/api/crm/test-connect', async (req, res) => {
   try {
-    await getUser(req);
+    console.log('[CRM Connect] Início da rota /api/crm/test-connect');
+    const user = await getUser(req);
     const { apiToken } = req.body;
 
     if (!apiToken) {
+      console.warn('[CRM Connect] Falha: apiToken ausente na requisição');
       return res.status(400).json({ error: 'Token de API é obrigatório.' });
     }
 
-    console.log(`[CRM] Testando conexão com: ${SIMPLO_BASE_URL}`);
+    // Se o token for o mascarado enviado do frontend, busca o existente no DB para manter
+    let finalToken = apiToken;
+    if (apiToken.includes('****')) {
+      console.log('[CRM Connect] Token recebido está mascarado. Buscando token real no banco...');
+      const { data: existing, error: existingError } = await supabase
+        .from('crm_configs')
+        .select('api_token')
+        .eq('user_id', user.id)
+        .single();
+
+      if (existingError) {
+        console.error('[CRM Connect] Erro ao buscar token existente:', existingError.message);
+      }
+
+      if (existing) {
+        finalToken = existing.api_token;
+        console.log('[CRM Connect] Token real recuperado com sucesso.');
+      } else {
+        console.warn('[CRM Connect] Falha: nenhum token existente para decodificar a máscara');
+        return res.status(400).json({ error: 'Token inválido ou não configurado no banco.' });
+      }
+    }
+
+    console.log(`[CRM Connect] Testando conexão com: ${SIMPLO_BASE_URL} usando token: ${maskToken(finalToken)}`);
 
     // Chamada de teste para validar o token (lista a 1ª página de abertas)
-    const response = await fetchWithTimeout(buildCrmListUrl(1, 'A', 'data_cadastro'), {
+    const testUrl = buildCrmListUrl(1, 'A', 'data_cadastro');
+    console.log(`[CRM Connect] Efetuando fetch para URL: ${testUrl}`);
+    const response = await fetchWithTimeout(testUrl, {
       method: 'GET',
-      headers: { 'Authorization': apiToken, 'Accept': 'application/json' }
+      headers: { 'Authorization': finalToken, 'Accept': 'application/json' }
     }, 15000);
+
+    console.log(`[CRM Connect] Resposta recebida. Status: ${response.status}`);
 
     if (!response.ok) {
       const errorText = await response.text();
-      console.error(`[CRM] Falha na API: Status ${response.status}`, errorText);
+      console.error(`[CRM Connect] Falha na API do CRM: Status ${response.status}`, errorText);
       return res.status(response.status).json({
         error: `Falha na conexão com o CRM (Status ${response.status}). Verifique se o token está correto.`
       });
     }
 
+    console.log('[CRM Connect] Conexão com o CRM testada com sucesso!');
     res.json({ success: true, message: 'Conexão estabelecida com sucesso!' });
 
   } catch (error: any) {
-    console.error('[CRM] Erro ao testar conexão:', error);
+    console.error('[CRM Connect] Erro crítico ao testar conexão:', error);
     res.status(500).json({ error: `Erro ao conectar com a API: ${error.message}` });
   }
 });
@@ -1227,16 +1266,19 @@ app.get('/api/crm/config', async (req, res) => {
 // 3. Rota para salvar as credenciais (URL e mapeamento são fixos)
 app.post('/api/crm/config', async (req, res) => {
   try {
+    console.log('[CRM Config] Salvando credenciais do CRM...');
     const user = await getUser(req);
     const { apiToken } = req.body;
 
     if (!apiToken) {
+      console.warn('[CRM Config] Falha: apiToken ausente');
       return res.status(400).json({ error: 'Token de API é obrigatório.' });
     }
 
     // Se o token for o mascarado enviado do frontend, busca o existente no DB para manter
     let finalToken = apiToken;
     if (apiToken.includes('****')) {
+      console.log('[CRM Config] Token recebido está mascarado. Buscando original no banco...');
       const { data: existing } = await supabase
         .from('crm_configs')
         .select('api_token')
@@ -1246,10 +1288,12 @@ app.post('/api/crm/config', async (req, res) => {
       if (existing) {
         finalToken = existing.api_token;
       } else {
+        console.warn('[CRM Config] Falha: token mascarado enviado mas nenhum token existe no banco');
         return res.status(400).json({ error: 'Token inválido.' });
       }
     }
 
+    console.log(`[CRM Config] Salvando credenciais no Supabase para user: ${user.id}`);
     const { error } = await supabase
       .from('crm_configs')
       .upsert({
@@ -1261,23 +1305,28 @@ app.post('/api/crm/config', async (req, res) => {
       });
 
     if (error) {
-      console.error('[CRM] Erro ao salvar config no Supabase:', error);
+      console.error('[CRM Config] Erro ao salvar config no Supabase:', error);
       return res.status(500).json({ error: `Erro no banco de dados: ${error.message}` });
     }
 
+    console.log('[CRM Config] Configuração de integração salva com sucesso!');
     res.json({ success: true, message: 'Configuração de integração salva com sucesso!' });
 
   } catch (error: any) {
+    console.error('[CRM Config] Erro no endpoint /api/crm/config:', error);
     res.status(500).json({ error: error.message });
   }
 });
 
 // 4. Rota de sincronização manual sob demanda
 app.post('/api/crm/sync', async (req, res) => {
+  const startTime = Date.now();
   try {
+    console.log('[CRM Sync] Iniciando rota de sincronização manual...');
     const user = await getUser(req);
     
     // Busca credenciais do DB
+    console.log('[CRM Sync] Buscando configurações de CRM no Supabase...');
     const { data: config, error: configError } = await supabase
       .from('crm_configs')
       .select('*')
@@ -1285,6 +1334,7 @@ app.post('/api/crm/sync', async (req, res) => {
       .single();
 
     if (configError || !config) {
+      console.error('[CRM Sync] Erro: configuração de CRM não encontrada ou erro no DB:', configError?.message);
       return res.status(400).json({ error: 'Integração CRM não configurada. Configure a integração primeiro.' });
     }
 
@@ -1292,16 +1342,19 @@ app.post('/api/crm/sync', async (req, res) => {
     const syncBatchId = crypto.randomUUID();
     const batchName = `Sincronização API: ${new Date().toLocaleDateString('pt-BR')} ${new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}`;
 
-    console.log(`[CRM Sync] Iniciando importação manual para user: ${user.id}`);
+    console.log(`[CRM Sync] Buscando buckets do Simplo CRM para o usuário: ${user.id}`);
 
     // A API segrega por situação via query string (status=A/C/P). Buscamos os 3 grupos
     // separadamente e marcamos a situação pelo grupo de origem (sinal confiável).
+    console.log('[CRM Sync] Disparando requisições à API do CRM em paralelo...');
     const [abertas, ganhas, perdidas, motivoMap] = await Promise.all([
       fetchCrmBucket(api_token, 'A', 'data_cadastro'),
       fetchCrmBucket(api_token, 'C', 'data_conquista_perda'),
       fetchCrmBucket(api_token, 'P', 'data_conquista_perda'),
       fetchMotivoPerdaMap(api_token)
     ]);
+
+    console.log(`[CRM Sync] Extraídas ${abertas.length} abertas, ${ganhas.length} ganhas, ${perdidas.length} perdidas (total ${abertas.length + ganhas.length + perdidas.length}).`);
 
     const grupos: { rows: any[]; status: string }[] = [
       { rows: abertas, status: 'Em aberto' },
@@ -1310,9 +1363,9 @@ app.post('/api/crm/sync', async (req, res) => {
     ];
 
     const allCrmOpportunities = [...abertas, ...ganhas, ...perdidas];
-    console.log(`[CRM Sync] Extraídas ${abertas.length} abertas, ${ganhas.length} ganhas, ${perdidas.length} perdidas (total ${allCrmOpportunities.length}).`);
 
     if (allCrmOpportunities.length === 0) {
+      console.log('[CRM Sync] Nenhum registro encontrado no CRM. Atualizando config...');
       // Atualiza status no banco
       await supabase.from('crm_configs').update({
         last_sync: new Date().toISOString(),
@@ -1320,16 +1373,16 @@ app.post('/api/crm/sync', async (req, res) => {
         error_message: null
       }).eq('user_id', user.id);
 
+      const dbOpps = await fetchAllUserOpportunities(user.id);
+      console.log(`[CRM Sync] Finalizado com 0 registros. Total no banco: ${dbOpps.length}`);
       return res.json({
         message: 'Nenhum registro encontrado no CRM.',
         importedRows: 0,
-        totalDb: (await fetchAllUserOpportunities(user.id)).length
+        totalDb: dbOpps.length
       });
     }
 
     // --- TRAVA DE SEGURANÇA: 1 empresa por conta de BI ---
-    // O token do Simplo CRM já escopa os dados a uma única empresa (id_empresa).
-    // Vinculamos a conta de BI a essa empresa e impedimos misturar dados de outra.
     const empresasNoLote = Array.from(
       new Set(allCrmOpportunities.map((o: any) => String(o.id_empresa ?? '').trim()).filter(Boolean))
     );
@@ -1345,26 +1398,22 @@ app.post('/api/crm/sync', async (req, res) => {
       throw new Error(`Esta conta de BI já está vinculada à empresa ${empresaVinculada}, mas o token informado pertence à empresa ${empresaAtual}. Para trocar de empresa, remova primeiro os dados atuais na aba Histórico.`);
     }
 
-    // Normalização. A situação (Ganha/Perdida/Em aberto) vem do grupo da API, não do parsing.
-    // Usamos sempre o mapeamento fixo atual (ignora mapeamentos antigos salvos no banco).
+    console.log(`[CRM Sync] Empresa vinculada: ${empresaVinculada || 'Nenhuma (primeiro vínculo)'}. Empresa atual: ${empresaAtual}`);
+
+    // Normalização
+    console.log('[CRM Sync] Iniciando normalização dos dados recebidos...');
     const activeMapping = SIMPLO_CRM_MAPPING;
     const rawRows = grupos.flatMap(({ rows, status }) =>
       rows.map((rawRow: any) => {
         const cleanRow = normalizeRow(rawRow, activeMapping);
         cleanRow.status = status;
-
-        // CORREÇÃO DECIMAL: A API do Simplo CRM retorna o valor em centavos (inteiro).
-        // normalizeRow usa parseBrazilianCurrency que não divide por 100.
-        // Ex: 163303742 → parseBrazilianCurrency → 163303742 (ERRADO)
-        //     163303742 → parseCrmCurrency        → 1633037.42 (CORRETO)
         cleanRow.valor = parseCrmCurrency(rawRow[activeMapping.valor]);
 
-        // Traduz o id_motivo_perda para o nome do motivo (a oportunidade só traz o ID)
+        // Traduz o id_motivo_perda
         if (cleanRow.motivo_perda && motivoMap.has(cleanRow.motivo_perda)) {
           cleanRow.motivo_perda = motivoMap.get(cleanRow.motivo_perda)!;
         }
 
-        // Assinatura MD5 determinística para deduplicação
         const signature = `${user.id}-${cleanRow.protocolo}-${cleanRow.nome_cliente}-${cleanRow.data_criacao}-${cleanRow.valor}`;
         const uniqueHash = crypto.createHash('md5').update(signature).digest('hex');
 
@@ -1378,20 +1427,18 @@ app.post('/api/crm/sync', async (req, res) => {
       })
     );
 
-    // Filtra linhas válidas
     const validRows = rawRows.filter((r: any) => r.valor >= 0 && r.data_criacao);
-
-    // Deduplicação em nível de array de memória
     const uniqueRowsMap = new Map();
     validRows.forEach((row: any) => { uniqueRowsMap.set(row.unique_hash, row); });
     const rowsToUpsert = Array.from(uniqueRowsMap.values());
 
     console.log(`[CRM Sync] Linhas válidas e deduplicadas prontas para gravação: ${rowsToUpsert.length}`);
 
-    // Gravação em lote (upsert) no Supabase (1000 a 1000)
+    // Gravação em lote (upsert)
     const batchSize = 1000;
     for (let i = 0; i < rowsToUpsert.length; i += batchSize) {
       const batch = rowsToUpsert.slice(i, i + batchSize);
+      console.log(`[CRM Sync] Salvando lote no Supabase: ${i} a ${i + batch.length}...`);
       const { error } = await supabase
         .from('oportunidades')
         .upsert(batch, { onConflict: 'unique_hash', ignoreDuplicates: false });
@@ -1401,14 +1448,11 @@ app.post('/api/crm/sync', async (req, res) => {
         throw new Error(`Erro ao persistir no Supabase: ${error.message}`);
       }
     }
+    console.log('[CRM Sync] Gravação de oportunidades no Supabase concluída.');
 
-    // ─── PURGE: remove do banco registros que foram apagados no CRM ──────────
-    // Estratégia: compara os protocolos (id_oportunidade) retornados pela API
-    // com todos os que estão no banco para este usuário. Protocolos ausentes
-    // no lote atual foram deletados no CRM e devem sair do banco também.
-    // IMPORTANTE: usa unique_hash (PK real) para o delete, nunca "id".
+    // ─── PURGE ───
     try {
-      // Conjunto de protocolos vindos do CRM nesta sincronização
+      console.log('[CRM Sync] Iniciando varredura para Purge (remover registros deletados no CRM)...');
       const crmProtocolos = new Set(
         rowsToUpsert
           .map((r: any) => String(r.protocolo ?? '').trim())
@@ -1416,14 +1460,13 @@ app.post('/api/crm/sync', async (req, res) => {
       );
 
       if (crmProtocolos.size > 0) {
-        // Busca todos os unique_hash + protocolo persistidos para este usuário
-        // Usa paginação para não perder registros além do limite de 1000 do Supabase
         let allDbRows: any[] = [];
         let fromIdx = 0;
         const pageSize = 1000;
         let keepFetching = true;
 
         while (keepFetching) {
+          console.log(`[CRM Sync] Purge: Buscando registros locais no banco (range ${fromIdx} a ${fromIdx + pageSize - 1})...`);
           const { data: page, error: pageError } = await supabase
             .from('oportunidades')
             .select('unique_hash, protocolo')
@@ -1442,18 +1485,16 @@ app.post('/api/crm/sync', async (req, res) => {
           }
         }
 
-        // Identifica hashes de registros cujo protocolo não veio mais do CRM
+        console.log(`[CRM Sync] Purge: total de registros locais encontrados para varredura: ${allDbRows.length}`);
         const hashesParaDeletar = allDbRows
           .filter((row: any) => {
             const proto = String(row.protocolo ?? '').trim();
-            // Só purga se tem protocolo preenchido (registros de CSV têm protocolo vazio/N/A)
             return proto && proto !== 'N/A' && !crmProtocolos.has(proto);
           })
           .map((row: any) => row.unique_hash);
 
         if (hashesParaDeletar.length > 0) {
-          console.log(`[CRM Sync] Purge: ${hashesParaDeletar.length} oportunidade(s) deletada(s) no CRM serão removidas do banco.`);
-
+          console.log(`[CRM Sync] Purge: ${hashesParaDeletar.length} oportunidade(s) serão removidas.`);
           const deleteBatchSize = 500;
           for (let i = 0; i < hashesParaDeletar.length; i += deleteBatchSize) {
             const batch = hashesParaDeletar.slice(i, i + deleteBatchSize);
@@ -1461,23 +1502,23 @@ app.post('/api/crm/sync', async (req, res) => {
               .from('oportunidades')
               .delete()
               .in('unique_hash', batch)
-              .eq('user_id', user.id); // Segurança extra
+              .eq('user_id', user.id);
 
             if (delError) {
               console.error('[CRM Sync] Aviso: erro ao purgar registros:', delError.message);
             }
           }
+          console.log('[CRM Sync] Purge executado com sucesso.');
         } else {
-          console.log('[CRM Sync] Purge: nenhum registro deletado no CRM desde a última sync.');
+          console.log('[CRM Sync] Purge: nenhum registro local para deletar.');
         }
       }
     } catch (purgeError: any) {
-      // Purge nunca deve abortar o sync — apenas loga o problema
-      console.error('[CRM Sync] Aviso: falha no purge (sync continua):', purgeError.message);
+      console.error('[CRM Sync] Aviso: falha no purge (sincronização prossegue):', purgeError.message);
     }
-    // ─────────────────────────────────────────────────────────────────────────
 
-    // Registra no histórico de importações para permitir reversão
+    // Registra no histórico
+    console.log('[CRM Sync] Gravando histórico de importação...');
     await supabase.from('import_history').insert({
       id: syncBatchId,
       user_id: user.id,
@@ -1486,7 +1527,8 @@ app.post('/api/crm/sync', async (req, res) => {
       created_at: new Date().toISOString()
     });
 
-    // Atualiza status de sincronização e vincula a empresa à conta de BI
+    // Atualiza status de sincronização e vincula a empresa
+    console.log('[CRM Sync] Atualizando crm_configs com sucesso e vinculando empresa...');
     await supabase.from('crm_configs').update({
       last_sync: new Date().toISOString(),
       sync_status: 'sucesso',
@@ -1494,7 +1536,10 @@ app.post('/api/crm/sync', async (req, res) => {
       id_empresa: empresaAtual
     }).eq('user_id', user.id);
 
+    console.log('[CRM Sync] Carregando dados atualizados do banco para enviar ao frontend...');
     const finalDbData = await fetchAllUserOpportunities(user.id);
+    const duration = ((Date.now() - startTime) / 1000).toFixed(2);
+    console.log(`[CRM Sync] Sincronização finalizada em ${duration}s. Enviando ${finalDbData.length} registros para o frontend.`);
 
     res.json({
       message: 'Sincronização realizada com sucesso',
@@ -1504,7 +1549,8 @@ app.post('/api/crm/sync', async (req, res) => {
     });
 
   } catch (error: any) {
-    console.error('[CRM Sync] Erro Crítico de Sincronização:', error);
+    const duration = ((Date.now() - startTime) / 1000).toFixed(2);
+    console.error(`[CRM Sync] Erro Crítico após ${duration}s:`, error);
     
     // Registra falha na tabela crm_configs
     try {
