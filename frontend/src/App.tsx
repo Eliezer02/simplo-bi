@@ -15,7 +15,7 @@ import Help from './components/Help.tsx';
 import { Sparkles, LayoutDashboard, MessageSquare, LogOut, Map, Building2, RefreshCw, Settings, Sun, Moon } from 'lucide-react';
 import { Container, Button, Navbar, Nav, Form } from 'react-bootstrap';
 
-const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001';
+const API_URL = import.meta.env.VITE_API_URL || 'https://simplo-bi-api.onrender.com';
 
 type ActiveTab = 'dashboard' | 'geo' | 'clients' | 'chat' | 'history' | 'help' | 'crm';
 type AIProvider = 'openai' | 'gemini';
